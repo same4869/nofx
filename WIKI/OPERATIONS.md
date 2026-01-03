@@ -30,6 +30,14 @@
   - DecisionCard 会展示 `RISK:`（风控快照）
   - DecisionCard 会展示 `METRIC:`（耗时快照）
 
+## 行情数据源（K线）与缓存
+
+- K线来源：用 `.env` 设置 `MARKET_KLINE_SOURCE=auto|binance|coinank`
+  - 推荐：`auto`（优先 Binance，失败回退 CoinAnk）
+- 生效方式：修改 `.env` 后运行 `./start.sh recreate`
+- 验证方式：`./start.sh logs backend` 中会打印 `Market kline source: ...`
+- 缓存策略（P1）：K线缓存按“下一根 bar 出现”做刷新（1h/4h/1d 会显著减少重复拉取）
+
 ## 异常与降级
 
 当前降级策略（后端）：
@@ -44,3 +52,14 @@
 1) “更新很慢”  
 若 primary 选 1h/4h/1d，OPN 只会在下一根 bar open 才成交，这是设计。  
 想快速验收链路：用 Strategy Studio 的 fast preset（1m primary）。
+
+2) “开仓太猛/杠杆太高”
+
+推荐做法（更稳健）：
+- 在 Strategy Studio 把 `prompt_variant` 设为 `conservative`
+- 风控建议起步值（可按你偏好再收紧）：
+  - `max_positions=2`
+  - `btc_eth_max_leverage=2~3`，`altcoin_max_leverage=2`
+  - `btc_eth_max_position_value_ratio=0.3~0.6`，`altcoin_max_position_value_ratio=0.1~0.25`
+  - `max_margin_usage=0.2`
+  - `min_confidence=80`（后端硬闸门，低置信开仓会被拒绝）

@@ -109,11 +109,17 @@ func (s *Server) handleCreateStrategy(c *gin.Context) {
 		Name        string               `json:"name" binding:"required"`
 		Description string               `json:"description"`
 		Config      store.StrategyConfig `json:"config" binding:"required"`
+		PromptVariant string             `json:"prompt_variant"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request parameters: " + err.Error()})
 		return
+	}
+
+	// Backward/forward compat: allow prompt_variant at top-level or inside config.
+	if req.PromptVariant != "" && req.Config.PromptVariant == "" {
+		req.Config.PromptVariant = req.PromptVariant
 	}
 
 	// Serialize configuration
@@ -177,11 +183,17 @@ func (s *Server) handleUpdateStrategy(c *gin.Context) {
 		Name        string               `json:"name"`
 		Description string               `json:"description"`
 		Config      store.StrategyConfig `json:"config"`
+		PromptVariant string             `json:"prompt_variant"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request parameters: " + err.Error()})
 		return
+	}
+
+	// Backward/forward compat: allow prompt_variant at top-level or inside config.
+	if req.PromptVariant != "" && req.Config.PromptVariant == "" {
+		req.Config.PromptVariant = req.PromptVariant
 	}
 
 	// Serialize configuration
@@ -349,7 +361,11 @@ func (s *Server) handlePreviewPrompt(c *gin.Context) {
 		req.AccountEquity = 1000.0 // Default simulated account equity
 	}
 	if req.PromptVariant == "" {
-		req.PromptVariant = "balanced"
+		if strings.TrimSpace(req.Config.PromptVariant) != "" {
+			req.PromptVariant = req.Config.PromptVariant
+		} else {
+			req.PromptVariant = "balanced"
+		}
 	}
 
 	// Create strategy engine to build prompt
@@ -395,7 +411,11 @@ func (s *Server) handleStrategyTestRun(c *gin.Context) {
 	}
 
 	if req.PromptVariant == "" {
-		req.PromptVariant = "balanced"
+		if strings.TrimSpace(req.Config.PromptVariant) != "" {
+			req.PromptVariant = req.Config.PromptVariant
+		} else {
+			req.PromptVariant = "balanced"
+		}
 	}
 
 	// Create strategy engine to build prompt
@@ -585,4 +605,3 @@ func (s *Server) runRealAITest(userID, modelID, systemPrompt, userPrompt string)
 
 	return response, nil
 }
-

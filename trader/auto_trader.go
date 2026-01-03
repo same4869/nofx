@@ -601,7 +601,12 @@ func (at *AutoTrader) runCycle() error {
 	// 5. Use strategy engine to call AI for decision
 	logger.Infof("🤖 Requesting AI analysis and decision... [Strategy Engine]")
 	aiStart := time.Now()
-	aiDecision, err := decision.GetFullDecisionWithStrategy(ctx, at.mcpClient, at.strategyEngine, "balanced")
+	promptVariant := "balanced"
+	if at.config.StrategyConfig != nil && strings.TrimSpace(at.config.StrategyConfig.PromptVariant) != "" {
+		promptVariant = strings.TrimSpace(at.config.StrategyConfig.PromptVariant)
+	}
+	ctx.PromptVariant = promptVariant
+	aiDecision, err := decision.GetFullDecisionWithStrategy(ctx, at.mcpClient, at.strategyEngine, promptVariant)
 	aiMs := time.Since(aiStart).Milliseconds()
 
 	if aiDecision != nil && aiDecision.AIRequestDurationMs > 0 {
@@ -1132,6 +1137,15 @@ func (at *AutoTrader) ExecuteDecision(d *decision.Decision) error {
 func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, actionRecord *store.DecisionAction) error {
 	logger.Infof("  📈 Open long: %s", decision.Symbol)
 
+	// [CODE ENFORCED] Min confidence gate for opening positions.
+	if err := at.enforceMinConfidenceOnOpen(decision); err != nil {
+		if at.config.StrategyConfig != nil {
+			actionRecord.Reasoning = strings.TrimSpace(fmt.Sprintf("%s | rejected_by_min_confidence:%d<%d",
+				actionRecord.Reasoning, decision.Confidence, at.config.StrategyConfig.RiskControl.MinConfidence))
+		}
+		return err
+	}
+
 	// ⚠️ Get current positions for multiple checks
 	positions, err := at.trader.GetPositions()
 	if err != nil {
@@ -1298,6 +1312,15 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 // executeOpenShortWithRecord executes open short position and records detailed information
 func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, actionRecord *store.DecisionAction) error {
 	logger.Infof("  📉 Open short: %s", decision.Symbol)
+
+	// [CODE ENFORCED] Min confidence gate for opening positions.
+	if err := at.enforceMinConfidenceOnOpen(decision); err != nil {
+		if at.config.StrategyConfig != nil {
+			actionRecord.Reasoning = strings.TrimSpace(fmt.Sprintf("%s | rejected_by_min_confidence:%d<%d",
+				actionRecord.Reasoning, decision.Confidence, at.config.StrategyConfig.RiskControl.MinConfidence))
+		}
+		return err
+	}
 
 	// ⚠️ Get current positions for multiple checks
 	positions, err := at.trader.GetPositions()
@@ -2429,6 +2452,23 @@ func (at *AutoTrader) enforceMaxPositions(currentPositionCount int) error {
 
 	if currentPositionCount >= maxPositions {
 		return fmt.Errorf("❌ [RISK CONTROL] Already at max positions (%d/%d)", currentPositionCount, maxPositions)
+	}
+	return nil
+}
+
+func (at *AutoTrader) enforceMinConfidenceOnOpen(d *decision.Decision) error {
+	if at == nil || d == nil {
+		return nil
+	}
+	if at.config.StrategyConfig == nil {
+		return nil
+	}
+	minConf := at.config.StrategyConfig.RiskControl.MinConfidence
+	if minConf <= 0 {
+		return nil
+	}
+	if d.Confidence < minConf {
+		return fmt.Errorf("❌ [RISK CONTROL] confidence %d < min_confidence %d", d.Confidence, minConf)
 	}
 	return nil
 }

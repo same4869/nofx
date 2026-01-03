@@ -31,6 +31,8 @@ type StrategyConfig struct {
 	CoinSource CoinSourceConfig `json:"coin_source"`
 	// quantitative data configuration
 	Indicators IndicatorConfig `json:"indicators"`
+	// prompt variant: balanced/aggressive/conservative/scalping
+	PromptVariant string `json:"prompt_variant,omitempty"`
 	// custom prompt (appended at the end)
 	CustomPrompt string `json:"custom_prompt,omitempty"`
 	// risk control configuration
@@ -159,7 +161,7 @@ type ExternalDataSource struct {
 //   - MaxMarginUsage: max margin utilization percentage (CODE ENFORCED)
 //   - MinPositionSize: minimum position size in USDT (CODE ENFORCED)
 //   - MinRiskRewardRatio: min take_profit / stop_loss ratio (AI guided)
-//   - MinConfidence: min AI confidence to open position (AI guided)
+//   - MinConfidence: min AI confidence to open position (CODE ENFORCED)
 type RiskControlConfig struct {
 	// Max number of coins held simultaneously (CODE ENFORCED)
 	MaxPositions int `json:"max_positions"`
@@ -193,7 +195,7 @@ type RiskControlConfig struct {
 
 	// Min take_profit / stop_loss ratio (AI guided)
 	MinRiskRewardRatio float64 `json:"min_risk_reward_ratio"`
-	// Min AI confidence to open position (AI guided)
+	// Min AI confidence to open position (CODE ENFORCED)
 	MinConfidence int `json:"min_confidence"`
 }
 
@@ -280,21 +282,22 @@ func GetDefaultStrategyConfig(lang string) StrategyConfig {
 			OIRankingDuration: "1h",
 			OIRankingLimit:    10,
 		},
+		PromptVariant: "balanced",
 		RiskControl: RiskControlConfig{
-			MaxPositions:                 3,   // Max 3 coins simultaneously (CODE ENFORCED)
-			BTCETHMaxLeverage:            5,   // BTC/ETH exchange leverage (AI guided)
-			AltcoinMaxLeverage:           5,   // Altcoin exchange leverage (AI guided)
-			BTCETHMaxPositionValueRatio:  5.0, // BTC/ETH: max position = 5x equity (CODE ENFORCED)
-			AltcoinMaxPositionValueRatio: 1.0, // Altcoin: max position = 1x equity (CODE ENFORCED)
-			MaxMarginUsage:               0.3, // Max 30% margin usage (CODE ENFORCED)
+			MaxPositions:                 2,   // Max 2 coins simultaneously (CODE ENFORCED)
+			BTCETHMaxLeverage:            3,   // BTC/ETH exchange leverage (AI guided)
+			AltcoinMaxLeverage:           2,   // Altcoin exchange leverage (AI guided)
+			BTCETHMaxPositionValueRatio:  0.5, // BTC/ETH: max position = 0.5x equity (CODE ENFORCED)
+			AltcoinMaxPositionValueRatio: 0.2, // Altcoin: max position = 0.2x equity (CODE ENFORCED)
+			MaxMarginUsage:               0.2, // Max 20% margin usage (CODE ENFORCED)
 			MinPositionSize:              12,  // Min 12 USDT per position (CODE ENFORCED)
 			DailyLossLimit:               0.0, // Disabled by default (CODE ENFORCED)
 			MaxDrawdown:                  0.0, // Disabled by default (CODE ENFORCED)
 			StopCooldownMinutes:          360, // 6h cooldown after circuit breaker
 			MaxRiskUSD:                   0.0, // Disabled by default (CODE ENFORCED)
 			RequireProtection:            false,
-			MinRiskRewardRatio:           3.0, // Min 3:1 profit/loss ratio (AI guided)
-			MinConfidence:                75,  // Min 75% confidence (AI guided)
+			MinRiskRewardRatio:           2.0, // Min 2:1 profit/loss ratio (AI guided)
+			MinConfidence:                80,  // Min 80% confidence (CODE ENFORCED)
 		},
 	}
 

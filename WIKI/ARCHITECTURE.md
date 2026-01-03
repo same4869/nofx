@@ -7,12 +7,13 @@
 - 候选币：static / topn
 - 指标：多周期 `selected_timeframes` + `primary_timeframe` + count
 - 风控：RiskControl（含硬闸门字段）
+- Prompt 风格：`prompt_variant`（balanced/aggressive/conservative/scalping）
 
 2) Context（交易上下文）  
 `AutoTrader.buildTradingContext()`：
 - 拉 balance/positions
 - 获取 candidate coins
-- 拉多周期 market data（`market.GetWithTimeframes`）
+- 拉多周期 market data（`market.GetWithTimeframes`，K线来源由 `MARKET_KLINE_SOURCE` 控制）
 - 拼接成 `decision.Context`
 
 3) AI 决策  
@@ -20,6 +21,9 @@
 - 构建 system prompt / user prompt
 - 调 AI（MCP client）
 - 解析为 decisions（open/close/hold/wait）
+
+说明：
+- `prompt_variant` 会从策略配置透传给 AutoTrader，用于生成更保守/更激进的规则与仓位建议。
 
 4) 执行与落库  
 `AutoTrader.execute*WithRecord()`：
@@ -48,3 +52,8 @@
 - `RISK:`：每个 cycle 的账户级风险快照（用于复盘与 UI）。  
 - `METRIC:`：每个 cycle 的性能/耗时快照（用于长跑与定位瓶颈）。  
 
+## 行情数据一致性（K线来源）
+
+为了让 “决策输入 / 看板K线 / paper OPN（next_open）/ 回测” 更可复现，K线来源支持统一配置：
+- 环境变量：`MARKET_KLINE_SOURCE=auto|binance|coinank`
+- 推荐：`auto`（优先 Binance，失败回退 CoinAnk）或 `binance`（最一致）

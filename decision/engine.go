@@ -752,6 +752,7 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	var sb strings.Builder
 	riskControl := e.config.RiskControl
 	promptSections := e.config.PromptSections
+	variantNorm := strings.ToLower(strings.TrimSpace(variant))
 
 	// 0. Data Dictionary & Schema (ensure AI understands all fields)
 	lang := detectLanguage(promptSections.RoleDefinition)
@@ -770,7 +771,7 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	}
 
 	// 2. Trading mode variant
-	switch strings.ToLower(strings.TrimSpace(variant)) {
+	switch variantNorm {
 	case "aggressive":
 		sb.WriteString("## Mode: Aggressive\n- Prioritize capturing trend breakouts, can build positions in batches when confidence ≥ 70\n- Allow higher positions, but must strictly set stop-loss and explain risk-reward ratio\n\n")
 	case "conservative":
@@ -817,20 +818,35 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	if riskControl.RequireProtection {
 		sb.WriteString("- Protection Required: stop_loss + take_profit must be set, otherwise rollback\n")
 	}
-	sb.WriteString(fmt.Sprintf("- Min Position Size: ≥%.0f USDT\n\n", riskControl.MinPositionSize))
+	sb.WriteString(fmt.Sprintf("- Min Position Size: ≥%.0f USDT\n", riskControl.MinPositionSize))
+	if riskControl.MinConfidence > 0 {
+		sb.WriteString(fmt.Sprintf("- Min Confidence: ≥%d to open position\n", riskControl.MinConfidence))
+	}
+	sb.WriteString("\n")
 
 	sb.WriteString("## AI GUIDED (Recommended, you should follow):\n")
 	sb.WriteString(fmt.Sprintf("- Trading Leverage: Altcoins max %dx | BTC/ETH max %dx\n",
 		riskControl.AltcoinMaxLeverage, riskControl.BTCETHMaxLeverage))
 	sb.WriteString(fmt.Sprintf("- Risk-Reward Ratio: ≥1:%.1f (take_profit / stop_loss)\n", riskControl.MinRiskRewardRatio))
-	sb.WriteString(fmt.Sprintf("- Min Confidence: ≥%d to open position\n\n", riskControl.MinConfidence))
+	sb.WriteString("\n")
 
 	// Position sizing guidance
 	sb.WriteString("## Position Sizing Guidance\n")
 	sb.WriteString("Calculate `position_size_usd` based on your confidence and the Position Value Limits above:\n")
-	sb.WriteString("- High confidence (≥85): Use 80-100%% of max position value limit\n")
-	sb.WriteString("- Medium confidence (70-84): Use 50-80%% of max position value limit\n")
-	sb.WriteString("- Low confidence (60-69): Use 30-50%% of max position value limit\n")
+	switch variantNorm {
+	case "aggressive":
+		sb.WriteString("- High confidence (≥85): Use 60-90% of max position value limit\n")
+		sb.WriteString("- Medium confidence (70-84): Use 40-60% of max position value limit\n")
+		sb.WriteString("- Low confidence (60-69): Use 20-40% of max position value limit\n")
+	case "conservative":
+		sb.WriteString("- High confidence (≥85): Use 25-50% of max position value limit\n")
+		sb.WriteString("- Medium confidence (70-84): Use 15-30% of max position value limit\n")
+		sb.WriteString("- Low confidence (60-69): Use 5-15% of max position value limit\n")
+	default: // balanced
+		sb.WriteString("- High confidence (≥85): Use 40-70% of max position value limit\n")
+		sb.WriteString("- Medium confidence (70-84): Use 25-50% of max position value limit\n")
+		sb.WriteString("- Low confidence (60-69): Use 10-25% of max position value limit\n")
+	}
 	sb.WriteString(fmt.Sprintf("- Example: With equity %.0f and BTC/ETH ratio %.1fx, max is %.0f USDT\n",
 		accountEquity, btcEthPosValueRatio, accountEquity*btcEthPosValueRatio))
 	sb.WriteString("- **DO NOT** just use available_balance as position_size_usd. Use the Position Value Limits!\n\n")
@@ -882,8 +898,14 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	sb.WriteString("<decision>\n")
 	sb.WriteString("Step 2: JSON decision array\n\n")
 	sb.WriteString("```json\n[\n")
-	// Use the actual configured position value ratio for BTC/ETH in the example
-	examplePositionSize := accountEquity * btcEthPosValueRatio
+	// Use a conservative fraction of the BTC/ETH max position value in the example.
+	exampleFrac := 0.5
+	if variantNorm == "aggressive" {
+		exampleFrac = 0.8
+	} else if variantNorm == "conservative" {
+		exampleFrac = 0.3
+	}
+	examplePositionSize := accountEquity * btcEthPosValueRatio * exampleFrac
 	sb.WriteString(fmt.Sprintf("  {\"symbol\": \"BTCUSDT\", \"action\": \"open_short\", \"leverage\": %d, \"position_size_usd\": %.0f, \"stop_loss\": 97000, \"take_profit\": 91000, \"confidence\": 85, \"risk_usd\": 300},\n",
 		riskControl.BTCETHMaxLeverage, examplePositionSize))
 	sb.WriteString("  {\"symbol\": \"ETHUSDT\", \"action\": \"close_long\"}\n")

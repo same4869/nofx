@@ -443,6 +443,7 @@ export interface PromptSectionsConfig {
 export interface StrategyConfig {
   coin_source: CoinSourceConfig;
   indicators: IndicatorConfig;
+  prompt_variant?: string; // balanced, aggressive, conservative, scalping
   custom_prompt?: string;
   risk_control: RiskControlConfig;
   prompt_sections?: PromptSectionsConfig;
@@ -537,7 +538,7 @@ export interface RiskControlConfig {
   max_risk_usd?: number;           // Per-trade max risk in USD (Decision.risk_usd). 0/undefined disables. (CODE ENFORCED)
   require_protection?: boolean;    // Require SL/TP set success, otherwise rollback. (CODE ENFORCED)
   min_risk_reward_ratio: number;   // Min take_profit / stop_loss ratio (AI guided)
-  min_confidence: number;          // Min AI confidence to open position (AI guided)
+  min_confidence: number;          // Min AI confidence to open position (CODE ENFORCED)
 }
 
 // Debate Arena Types

@@ -117,6 +117,7 @@ export function StrategyStudioPage() {
 
     const next: StrategyConfig = {
       ...base,
+      prompt_variant: 'conservative',
       coin_source: {
         ...base.coin_source,
         ...topnCoinSource,
@@ -131,9 +132,21 @@ export function StrategyStudioPage() {
           primary_count: klineCount,
         },
       },
+      risk_control: {
+        ...base.risk_control,
+        max_positions: 2,
+        btc_eth_max_leverage: preset === 'fast_sim' ? 3 : 2,
+        altcoin_max_leverage: 2,
+        btc_eth_max_position_value_ratio: 0.5,
+        altcoin_max_position_value_ratio: 0.2,
+        max_margin_usage: 0.2,
+        min_confidence: 80,
+        require_protection: true,
+      },
     }
 
     setEditingConfig(next)
+    setSelectedVariant('conservative')
     setHasChanges(true)
     notify.success(
       preset === 'fast_sim'
@@ -187,9 +200,11 @@ export function StrategyStudioPage() {
       if (active) {
         setSelectedStrategy(active)
         setEditingConfig(active.config)
+        setSelectedVariant(active.config?.prompt_variant || 'balanced')
       } else if (data.strategies?.length > 0) {
         setSelectedStrategy(data.strategies[0])
         setEditingConfig(data.strategies[0].config)
+        setSelectedVariant(data.strategies[0].config?.prompt_variant || 'balanced')
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unknown error')
@@ -203,6 +218,18 @@ export function StrategyStudioPage() {
     fetchAiModels()
   }, [fetchStrategies, fetchAiModels])
 
+  // Persist prompt variant into strategy config so AutoTrader can use it.
+  useEffect(() => {
+    if (!editingConfig) return
+    const current = editingConfig.prompt_variant || 'balanced'
+    if (current === selectedVariant) return
+    setEditingConfig({
+      ...editingConfig,
+      prompt_variant: selectedVariant,
+    })
+    setHasChanges(true)
+  }, [selectedVariant, editingConfig])
+
   // Create new strategy
   const handleCreateStrategy = async () => {
     if (!token) return
@@ -212,6 +239,7 @@ export function StrategyStudioPage() {
         { headers: { Authorization: `Bearer ${token}` } }
       )
       const defaultConfig = await configResponse.json()
+      setSelectedVariant(defaultConfig?.prompt_variant || 'balanced')
 
       const response = await fetch(`${API_BASE}/api/strategies`, {
         method: 'POST',
@@ -694,6 +722,7 @@ export function StrategyStudioPage() {
                   onClick={() => {
                     setSelectedStrategy(strategy)
                     setEditingConfig(strategy.config)
+                    setSelectedVariant(strategy.config?.prompt_variant || 'balanced')
                     setHasChanges(false)
                     setPromptPreview(null)
                     setAiTestResult(null)

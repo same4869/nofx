@@ -11,6 +11,7 @@ import (
 	"nofx/experience"
 	"nofx/logger"
 	"nofx/manager"
+	"nofx/market"
 	"nofx/mcp"
 	"nofx/store"
 	"os"
@@ -101,12 +102,12 @@ func main() {
 	logger.Info("🔑 JWT secret configured")
 
 	// WebSocket market monitor is NO LONGER USED
-	// All K-line data now comes from CoinAnk API instead of Binance WebSocket cache
+	// K-line data source is configurable; WebSocket cache is disabled for local single-user runs.
 	// Commented out to reduce unnecessary connections:
 	// go market.NewWSMonitor(150).Start(nil)
 	// logger.Info("📊 WebSocket market monitor started")
 	// time.Sleep(500 * time.Millisecond)
-	logger.Info("📊 Using CoinAnk API for all market data (WebSocket cache disabled)")
+	logger.Infof("📊 Market kline source: %s (WebSocket cache disabled)", market.MarketKlineSource())
 
 	// Create TraderManager and BacktestManager
 	traderManager := manager.NewTraderManager()

@@ -51,6 +51,16 @@
 
 实现状态（当前代码）：已增强 market 多周期拉取会优先按 `primary_count` 拉取更多根（上限 1500）并带缓存；推荐你在“实盘节奏（1h/4h/1d）”与“快速验收（1m primary）”之间切换来验证链路与性能。
 
+### P02-4：K线来源统一（决策/看板/OPN 一致性）
+
+- 用一个环境变量统一策略输入与看板K线的来源，减少“看见的K线”和“决策/撮合用的K线”不一致
+- 默认推荐 Binance（fapi）以更可复现；允许在网络故障时回退
+
+实现状态（当前代码）：已新增 `MARKET_KLINE_SOURCE=auto|binance|coinank`：
+- `auto`：优先 Binance，失败回退 CoinAnk
+- `binance`：只用 Binance（推荐用于 paper OPN/backtest 一致性）
+- `coinank`：只用 CoinAnk（不推荐用于严谨回测/OPN）
+
 ### K线“滑动窗口”（建议：只保留最近 N 根 + 增量补齐）
 
 - 目标：让“长期运行”不会随着时间推移无限增长内存/DB 负担，同时避免每 cycle 全量回拉。  

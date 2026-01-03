@@ -75,6 +75,11 @@
 - 用结构化卡片展示：Equity / MarginUsed / DailyLoss / Drawdown / StopUntil / Reason
 - raw execution log 默认过滤 `RISK:`（可切换为 raw 查看完整日志）
 
+### 6) MinConfidence 变为代码硬闸门 + PromptVariant 可持久化
+
+- `risk_control.min_confidence` 现在是后端硬闸门：开仓若 `confidence < min_confidence` 将直接拒绝执行（不再只是 prompt 建议）。
+- `prompt_variant`（balanced/aggressive/conservative/scalping）现在会写入 `strategy.config` 并在 AutoTrader 周期调用 AI 时生效，便于切换到更保守的行为模式。
+
 ### 5) P03-2：币种级硬闸门细化
 
 开仓执行时新增两类硬约束：

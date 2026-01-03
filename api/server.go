@@ -2398,13 +2398,27 @@ func (s *Server) handleKlines(c *gin.Context) {
 			return
 		}
 	default:
-		// Crypto exchanges via CoinAnk
+		// Crypto exchanges:
+		// - For Binance-like symbols/timeframes, prefer the unified market kline source to keep
+		//   charts consistent with strategy context building (and paper OPN when using Binance).
+		// - For other exchanges, keep CoinAnk routing (multi-exchange support) with fallback.
 		symbol = market.Normalize(symbol)
-		klines, err = s.getKlinesFromCoinank(symbol, interval, exchange, limit)
+
+		if exchangeLower == "binance" || exchangeLower == "aster" || exchangeLower == "lighter" {
+			// Only use unified source for supported intervals to avoid "1M" (month) ambiguity.
+			if _, tfErr := market.NormalizeTimeframe(interval); tfErr == nil {
+				klines, err = market.GetKlinesSeries(symbol, interval, limit)
+			} else {
+				klines, err = s.getKlinesFromCoinank(symbol, interval, exchange, limit)
+			}
+		} else {
+			klines, err = s.getKlinesFromCoinank(symbol, interval, exchange, limit)
+		}
+
 		if err != nil {
-			logger.Errorf("❌ CoinAnk API failed for %s on %s: %v", symbol, exchange, err)
+			logger.Errorf("❌ Kline fetch failed for %s on %s: %v", symbol, exchange, err)
 			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": fmt.Sprintf("Failed to get klines from CoinAnk: %v", err),
+				"error": fmt.Sprintf("Failed to get klines: %v", err),
 			})
 			return
 		}

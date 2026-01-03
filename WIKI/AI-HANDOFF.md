@@ -96,6 +96,6 @@
 ## 未来迭代建议（如果要继续）
 
 优先级建议：
-1) 把 K 线数据源从 CoinAnk 收敛到 Binance 官方（更稳定/可复现）  
+1) K 线数据源已支持收敛到 Binance 官方：用 `MARKET_KLINE_SOURCE=auto|binance`（更稳定/可复现）  
 2) 为 paper 增加 spot 模拟（与 perp 分开）  
 3) 实盘接入做成“仅替换执行器”的开关（保持风控与日志一致）  
