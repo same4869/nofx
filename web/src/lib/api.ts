@@ -410,6 +410,21 @@ export const api = {
     return result.data!
   },
 
+  // 获取订单列表（支持 trader_id + status + symbol）
+  async getOrders(
+    traderId: string,
+    opts?: { status?: string; symbol?: string; limit?: number }
+  ): Promise<any[]> {
+    const params = new URLSearchParams()
+    params.append('trader_id', traderId)
+    if (opts?.status) params.append('status', opts.status)
+    if (opts?.symbol) params.append('symbol', opts.symbol)
+    if (opts?.limit) params.append('limit', String(opts.limit))
+    const result = await httpClient.get<any[]>(`${API_BASE}/orders?${params}`)
+    if (!result.success) throw new Error('获取订单失败')
+    return result.data || []
+  },
+
   // 批量获取多个交易员的历史数据（无需认证）
   // hours: 可选参数，获取最近N小时的数据（0表示全部数据）
   // 常用值: 24=1天, 72=3天, 168=7天, 720=30天, 0=全部

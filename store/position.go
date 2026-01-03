@@ -31,21 +31,21 @@ type TraderPosition struct {
 	ExchangeType       string     `json:"exchange_type"`        // Exchange type: binance/bybit/okx/hyperliquid/aster/lighter
 	ExchangePositionID string     `json:"exchange_position_id"` // Exchange-specific unique position ID for deduplication
 	Symbol             string     `json:"symbol"`
-	Side               string     `json:"side"`            // LONG/SHORT
-	EntryQuantity      float64    `json:"entry_quantity"`  // Original entry quantity (never modified)
-	Quantity           float64    `json:"quantity"`        // Remaining quantity (reduced on partial close)
-	EntryPrice         float64    `json:"entry_price"`     // Entry price
-	EntryOrderID       string     `json:"entry_order_id"`  // Entry order ID
-	EntryTime          time.Time  `json:"entry_time"`      // Entry time
-	ExitPrice          float64    `json:"exit_price"`      // Exit price
-	ExitOrderID        string     `json:"exit_order_id"`   // Exit order ID
-	ExitTime           *time.Time `json:"exit_time"`       // Exit time
-	RealizedPnL        float64    `json:"realized_pnl"`    // Realized profit and loss
-	Fee                float64    `json:"fee"`             // Fee
-	Leverage           int        `json:"leverage"`        // Leverage multiplier
-	Status             string     `json:"status"`          // OPEN/CLOSED
-	CloseReason        string     `json:"close_reason"`    // Close reason: ai_decision/manual/stop_loss/take_profit
-	Source             string     `json:"source"`          // Source: system/manual/sync
+	Side               string     `json:"side"`           // LONG/SHORT
+	EntryQuantity      float64    `json:"entry_quantity"` // Original entry quantity (never modified)
+	Quantity           float64    `json:"quantity"`       // Remaining quantity (reduced on partial close)
+	EntryPrice         float64    `json:"entry_price"`    // Entry price
+	EntryOrderID       string     `json:"entry_order_id"` // Entry order ID
+	EntryTime          time.Time  `json:"entry_time"`     // Entry time
+	ExitPrice          float64    `json:"exit_price"`     // Exit price
+	ExitOrderID        string     `json:"exit_order_id"`  // Exit order ID
+	ExitTime           *time.Time `json:"exit_time"`      // Exit time
+	RealizedPnL        float64    `json:"realized_pnl"`   // Realized profit and loss
+	Fee                float64    `json:"fee"`            // Fee
+	Leverage           int        `json:"leverage"`       // Leverage multiplier
+	Status             string     `json:"status"`         // OPEN/CLOSED
+	CloseReason        string     `json:"close_reason"`   // Close reason: ai_decision/manual/stop_loss/take_profit
+	Source             string     `json:"source"`         // Source: system/manual/sync
 	CreatedAt          time.Time  `json:"created_at"`
 	UpdatedAt          time.Time  `json:"updated_at"`
 }
@@ -626,6 +626,28 @@ func (s *PositionStore) GetRecentTrades(traderID string, limit int) ([]RecentTra
 	return trades, nil
 }
 
+// SumRealizedPnLSince sums realized_pnl for CLOSED positions since the given UTC time.
+// When exchangeID is non-empty, it is included in the filter to avoid mixing multi-account data.
+func (s *PositionStore) SumRealizedPnLSince(traderID, exchangeID string, since time.Time) (float64, error) {
+	if exchangeID != "" {
+		var pnl float64
+		err := s.db.QueryRow(`
+			SELECT COALESCE(SUM(realized_pnl), 0)
+			FROM trader_positions
+			WHERE trader_id = ? AND exchange_id = ? AND status = 'CLOSED' AND exit_time IS NOT NULL AND exit_time >= ?
+		`, traderID, exchangeID, since.UTC().Format(time.RFC3339)).Scan(&pnl)
+		return pnl, err
+	}
+
+	var pnl float64
+	err := s.db.QueryRow(`
+		SELECT COALESCE(SUM(realized_pnl), 0)
+		FROM trader_positions
+		WHERE trader_id = ? AND status = 'CLOSED' AND exit_time IS NOT NULL AND exit_time >= ?
+	`, traderID, since.UTC().Format(time.RFC3339)).Scan(&pnl)
+	return pnl, err
+}
+
 // formatDuration formats a duration into a human-readable string
 // e.g. "2d3h", "5h30m", "45m", "30s"
 func formatDuration(d time.Duration) string {
@@ -795,10 +817,10 @@ func (s *PositionStore) GetSymbolStats(traderID string, limit int) ([]SymbolStat
 
 // HoldingTimeStats holding duration analysis
 type HoldingTimeStats struct {
-	Range       string  `json:"range"`        // e.g., "<1h", "1-4h", "4-24h", ">24h"
-	TradeCount  int     `json:"trade_count"`
-	WinRate     float64 `json:"win_rate"`
-	AvgPnL      float64 `json:"avg_pnl"`
+	Range      string  `json:"range"` // e.g., "<1h", "1-4h", "4-24h", ">24h"
+	TradeCount int     `json:"trade_count"`
+	WinRate    float64 `json:"win_rate"`
+	AvgPnL     float64 `json:"avg_pnl"`
 }
 
 // GetHoldingTimeStats analyzes performance by holding duration
@@ -914,9 +936,9 @@ type HistorySummary struct {
 	RecentPnL     float64 `json:"recent_pnl"`
 
 	// Streak info
-	CurrentStreak     int    `json:"current_streak"`      // Positive = wins, negative = losses
-	MaxWinStreak      int    `json:"max_win_streak"`
-	MaxLoseStreak     int    `json:"max_lose_streak"`
+	CurrentStreak int `json:"current_streak"` // Positive = wins, negative = losses
+	MaxWinStreak  int `json:"max_win_streak"`
+	MaxLoseStreak int `json:"max_lose_streak"`
 }
 
 // GetHistorySummary generates comprehensive AI context summary

@@ -2,6 +2,7 @@ package decision
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,8 @@ import (
 	"strings"
 	"time"
 )
+
+var ErrMarketDataUnavailable = errors.New("market data unavailable")
 
 // ============================================================================
 // Pre-compiled regular expressions (performance optimization)
@@ -119,7 +122,7 @@ type Context struct {
 	MultiTFMarket   map[string]map[string]*market.Data `json:"-"`
 	OITopDataMap    map[string]*OITopData              `json:"-"`
 	QuantDataMap    map[string]*QuantData              `json:"-"`
-	OIRankingData   *provider.OIRankingData                `json:"-"` // Market-wide OI ranking data
+	OIRankingData   *provider.OIRankingData            `json:"-"` // Market-wide OI ranking data
 	BTCETHLeverage  int                                `json:"-"`
 	AltcoinLeverage int                                `json:"-"`
 	Timeframes      []string                           `json:"-"`
@@ -370,6 +373,10 @@ func fetchMarketDataWithStrategy(ctx *Context, engine *StrategyEngine) error {
 		ctx.MarketDataMap[coin.Symbol] = data
 	}
 
+	if len(ctx.MarketDataMap) == 0 {
+		return fmt.Errorf("%w: failed to fetch market data for any symbol", ErrMarketDataUnavailable)
+	}
+
 	logger.Infof("📊 Successfully fetched multi-timeframe market data for %d coins", len(ctx.MarketDataMap))
 	return nil
 }
@@ -399,6 +406,24 @@ func (e *StrategyEngine) GetCandidateCoins() ([]CandidateCoin, error) {
 			candidates = append(candidates, CandidateCoin{
 				Symbol:  symbol,
 				Sources: []string{"static"},
+			})
+		}
+		return candidates, nil
+
+	case "topn":
+		limit := coinSource.TopNLimit
+		refreshMins := coinSource.TopNRefreshMins
+		hExtra := coinSource.TopNHysteresisExtra
+		minDwell := coinSource.TopNMinDwellMins
+		symbols, err := getBinanceTopNUniverse(limit, refreshMins, hExtra, minDwell)
+		if err != nil {
+			return nil, err
+		}
+		candidates = make([]CandidateCoin, 0, len(symbols))
+		for _, sym := range symbols {
+			candidates = append(candidates, CandidateCoin{
+				Symbol:  market.Normalize(sym),
+				Sources: []string{"topn"},
 			})
 		}
 		return candidates, nil
@@ -772,6 +797,26 @@ func (e *StrategyEngine) BuildSystemPrompt(accountEquity float64, variant string
 	sb.WriteString(fmt.Sprintf("- Position Value Limit (BTC/ETH): max %.0f USDT (= equity %.0f × %.1fx)\n",
 		accountEquity*btcEthPosValueRatio, accountEquity, btcEthPosValueRatio))
 	sb.WriteString(fmt.Sprintf("- Max Margin Usage: ≤%.0f%%\n", riskControl.MaxMarginUsage*100))
+	if riskControl.DailyLossLimit > 0 {
+		cooldown := riskControl.StopCooldownMinutes
+		if cooldown <= 0 {
+			cooldown = 360
+		}
+		sb.WriteString(fmt.Sprintf("- Daily Loss Circuit: ≤%.1f%% (pause %d minutes)\n", riskControl.DailyLossLimit*100, cooldown))
+	}
+	if riskControl.MaxDrawdown > 0 {
+		cooldown := riskControl.StopCooldownMinutes
+		if cooldown <= 0 {
+			cooldown = 360
+		}
+		sb.WriteString(fmt.Sprintf("- Max Drawdown Circuit: ≤%.1f%% (pause %d minutes)\n", riskControl.MaxDrawdown*100, cooldown))
+	}
+	if riskControl.MaxRiskUSD > 0 {
+		sb.WriteString(fmt.Sprintf("- Max Risk per Trade: ≤%.0f USDT (risk_usd + stop-loss distance)\n", riskControl.MaxRiskUSD))
+	}
+	if riskControl.RequireProtection {
+		sb.WriteString("- Protection Required: stop_loss + take_profit must be set, otherwise rollback\n")
+	}
 	sb.WriteString(fmt.Sprintf("- Min Position Size: ≥%.0f USDT\n\n", riskControl.MinPositionSize))
 
 	sb.WriteString("## AI GUIDED (Recommended, you should follow):\n")

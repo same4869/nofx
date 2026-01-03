@@ -98,6 +98,7 @@ function AIAvatar({ name, size = 24 }: { name: string; size?: number }) {
   const providers: Record<string, { bg: string; text: string; letter: string }> = {
     claude: { bg: 'bg-orange-500', text: 'text-white', letter: 'C' },
     deepseek: { bg: 'bg-blue-600', text: 'text-white', letter: 'D' },
+    linkai: { bg: 'bg-yellow-500', text: 'text-black', letter: 'L' },
     gemini: { bg: 'bg-blue-400', text: 'text-white', letter: 'G' },
     grok: { bg: 'bg-gray-700', text: 'text-white', letter: 'X' },
     kimi: { bg: 'bg-purple-500', text: 'text-white', letter: 'K' },

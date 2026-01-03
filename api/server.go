@@ -1889,6 +1889,7 @@ func (s *Server) handleCreateExchange(c *gin.Context) {
 	validTypes := map[string]bool{
 		"binance": true, "bybit": true, "okx": true, "bitget": true,
 		"hyperliquid": true, "aster": true, "lighter": true,
+		"paper": true,
 	}
 	if !validTypes[req.ExchangeType] {
 		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Invalid exchange type: %s", req.ExchangeType)})
@@ -3240,6 +3241,7 @@ func (s *Server) handleGetSupportedModels(c *gin.Context) {
 	supportedModels := []map[string]interface{}{
 		{"id": "deepseek", "name": "DeepSeek", "provider": "deepseek", "defaultModel": "deepseek-chat"},
 		{"id": "qwen", "name": "Qwen", "provider": "qwen", "defaultModel": "qwen3-max"},
+		{"id": "linkai", "name": "LinkAI", "provider": "linkai", "defaultModel": "deepseek-chat"},
 		{"id": "openai", "name": "OpenAI", "provider": "openai", "defaultModel": "gpt-5.1"},
 		{"id": "claude", "name": "Claude", "provider": "claude", "defaultModel": "claude-opus-4-5-20251101"},
 		{"id": "gemini", "name": "Google Gemini", "provider": "gemini", "defaultModel": "gemini-3-pro-preview"},
@@ -3255,6 +3257,7 @@ func (s *Server) handleGetSupportedExchanges(c *gin.Context) {
 	// Return static list of supported exchange types
 	// Note: ID is empty for supported exchanges (they are templates, not actual accounts)
 	supportedExchanges := []SafeExchangeConfig{
+		{ExchangeType: "paper", Name: "Paper (Simulated Perp)", Type: "paper"},
 		{ExchangeType: "binance", Name: "Binance Futures", Type: "cex"},
 		{ExchangeType: "bybit", Name: "Bybit Futures", Type: "cex"},
 		{ExchangeType: "okx", Name: "OKX Futures", Type: "cex"},

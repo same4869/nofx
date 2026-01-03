@@ -41,6 +41,8 @@ function getModelDisplayName(modelId: string): string {
       return 'DeepSeek'
     case 'qwen':
       return 'Qwen'
+    case 'linkai':
+      return 'LinkAI'
     case 'claude':
       return 'Claude'
     default:
@@ -57,6 +59,7 @@ function getShortName(fullName: string): string {
 // AI Provider configuration - default models and API links
 const AI_PROVIDER_CONFIG: Record<string, {
   defaultModel: string
+  defaultBaseURL?: string
   apiUrl: string
   apiName: string
 }> = {
@@ -69,6 +72,12 @@ const AI_PROVIDER_CONFIG: Record<string, {
     defaultModel: 'qwen3-max',
     apiUrl: 'https://dashscope.console.aliyun.com/apiKey',
     apiName: 'Alibaba Cloud',
+  },
+  linkai: {
+    defaultModel: 'deepseek-chat',
+    defaultBaseURL: 'https://api.link-ai.tech/v1',
+    apiUrl: 'https://docs.link-ai.tech/platform/api#auth',
+    apiName: 'LinkAI',
   },
   openai: {
     defaultModel: 'gpt-5.2',
@@ -1533,6 +1542,21 @@ function ModelConfigModal({
     }
   }, [editingModelId, selectedModel])
 
+  // 新建配置时：为特定 provider 预填更合理的默认值（提升一致性/少踩坑）
+  useEffect(() => {
+    if (editingModelId || !selectedModel) return
+    const preset = AI_PROVIDER_CONFIG[selectedModel.provider]
+    if (!preset) return
+
+    if (!baseUrl.trim() && preset.defaultBaseURL) {
+      setBaseUrl(preset.defaultBaseURL)
+    }
+    // LinkAI 是聚合网关：不填 modelName 容易落到不匹配的默认模型，因此默认预填
+    if (selectedModel.provider === 'linkai' && !modelName.trim() && preset.defaultModel) {
+      setModelName(preset.defaultModel)
+    }
+  }, [editingModelId, selectedModel, baseUrl, modelName])
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     if (!selectedModelId || !apiKey.trim()) return
@@ -1666,6 +1690,13 @@ function ModelConfigModal({
                     {selectedModel.provider === 'kimi' && (
                       <div className="mt-2 text-xs p-2 rounded" style={{ background: 'rgba(246, 70, 93, 0.1)', color: '#F6465D' }}>
                         ⚠️ {t('kimiApiNote', language)}
+                      </div>
+                    )}
+                    {selectedModel.provider === 'linkai' && (
+                      <div className="mt-2 text-xs p-2 rounded" style={{ background: 'rgba(240, 185, 11, 0.1)', color: '#F0B90B' }}>
+                        {language === 'zh'
+                          ? 'LinkAI 为 OpenAI 兼容网关：推荐 BaseURL=https://api.link-ai.tech/v1；API Key 如需 app_code，通常格式为 APIKEY-APP_CODE。'
+                          : 'LinkAI is OpenAI-compatible: recommended BaseURL=https://api.link-ai.tech/v1; if app_code is required, API key is typically APIKEY-APP_CODE.'}
                       </div>
                     )}
                   </div>

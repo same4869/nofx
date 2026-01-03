@@ -86,6 +86,62 @@ export function StrategyStudioPage() {
   } | null>(null)
   const [isRunningAiTest, setIsRunningAiTest] = useState(false)
 
+  const applyPreset = (preset: 'personal_swing' | 'fast_sim') => {
+    if (!editingConfig) return
+    if (selectedStrategy?.is_default) return
+
+    const base = editingConfig
+    const topnCoinSource = {
+      source_type: 'topn' as const,
+      static_coins: [],
+      use_coin_pool: false,
+      use_oi_top: false,
+      topn_limit: 30,
+      topn_refresh_mins: 30,
+      topn_hysteresis_extra: 15,
+      topn_min_dwell_mins: 360,
+    }
+
+    const commonIndicators = {
+      ...base.indicators,
+      // Reduce external dependency & latency for local single-user runs.
+      enable_quant_data: false,
+      quant_data_api_url: '',
+      enable_oi_ranking: false,
+      oi_ranking_api_url: '',
+    }
+
+    const klinePrimary = preset === 'fast_sim' ? '1m' : '1h'
+    const klineSelected = preset === 'fast_sim' ? ['1m', '1h', '4h', '1d'] : ['1h', '4h', '1d']
+    const klineCount = preset === 'fast_sim' ? 300 : 300
+
+    const next: StrategyConfig = {
+      ...base,
+      coin_source: {
+        ...base.coin_source,
+        ...topnCoinSource,
+      },
+      indicators: {
+        ...commonIndicators,
+        klines: {
+          ...base.indicators.klines,
+          enable_multi_timeframe: true,
+          selected_timeframes: klineSelected,
+          primary_timeframe: klinePrimary,
+          primary_count: klineCount,
+        },
+      },
+    }
+
+    setEditingConfig(next)
+    setHasChanges(true)
+    notify.success(
+      preset === 'fast_sim'
+        ? (language === 'zh' ? '已应用：快速验收配置（1m primary + Top30）' : 'Applied: Fast sim preset (1m primary + Top30)')
+        : (language === 'zh' ? '已应用：个人波段配置（1h/4h/1d + Top30）' : 'Applied: Personal swing preset (1h/4h/1d + Top30)')
+    )
+  }
+
   const toggleSection = (section: keyof typeof expandedSections) => {
     setExpandedSections((prev) => ({
       ...prev,
@@ -486,12 +542,33 @@ export function StrategyStudioPage() {
       color: '#F0B90B',
       title: t('coinSource'),
       content: editingConfig && (
-        <CoinSourceEditor
-          config={editingConfig.coin_source}
-          onChange={(coinSource) => updateConfig('coin_source', coinSource)}
-          disabled={selectedStrategy?.is_default}
-          language={language}
-        />
+        <div className="space-y-3">
+          {!selectedStrategy?.is_default && (
+            <div className="flex flex-wrap gap-2">
+              <button
+                onClick={() => applyPreset('personal_swing')}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium"
+                style={{ background: 'rgba(240, 185, 11, 0.12)', border: '1px solid rgba(240, 185, 11, 0.35)', color: '#EAECEF' }}
+              >
+                {language === 'zh' ? '一键：1h/4h/1d + Top30' : 'Preset: 1h/4h/1d + Top30'}
+              </button>
+              <button
+                onClick={() => applyPreset('fast_sim')}
+                className="px-3 py-1.5 rounded-lg text-xs font-medium"
+                style={{ background: 'rgba(96, 165, 250, 0.12)', border: '1px solid rgba(96, 165, 250, 0.35)', color: '#EAECEF' }}
+              >
+                {language === 'zh' ? '一键：快速验收（1m primary）' : 'Preset: Fast sim (1m primary)'}
+              </button>
+            </div>
+          )}
+
+          <CoinSourceEditor
+            config={editingConfig.coin_source}
+            onChange={(coinSource) => updateConfig('coin_source', coinSource)}
+            disabled={selectedStrategy?.is_default}
+            language={language}
+          />
+        </div>
       ),
     },
     {

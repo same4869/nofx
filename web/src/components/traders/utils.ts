@@ -5,6 +5,8 @@ export function getModelDisplayName(modelId: string): string {
       return 'DeepSeek'
     case 'qwen':
       return 'Qwen'
+    case 'linkai':
+      return 'LinkAI'
     case 'claude':
       return 'Claude'
     default:

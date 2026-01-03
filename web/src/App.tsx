@@ -20,6 +20,7 @@ import { confirmToast, notify } from './lib/notify'
 import { useSystemConfig } from './hooks/useSystemConfig'
 import { DecisionCard } from './components/DecisionCard'
 import { PositionHistory } from './components/PositionHistory'
+import { OrderHistory } from './components/OrderHistory'
 import { PunkAvatar, getTraderAvatar } from './components/PunkAvatar'
 import { OFFICIAL_LINKS } from './constants/branding'
 import { BacktestPage } from './components/BacktestPage'
@@ -52,6 +53,8 @@ function getModelDisplayName(modelId: string): string {
       return 'DeepSeek'
     case 'qwen':
       return 'Qwen'
+    case 'linkai':
+      return 'LinkAI'
     case 'claude':
       return 'Claude'
     default:
@@ -1544,6 +1547,13 @@ function TraderDetailsPage({
             )}
           </div>
         </div>
+
+        {/* Recent Orders */}
+        {selectedTraderId && (
+          <div className="animate-slide-in" style={{ animationDelay: '0.18s' }}>
+            <OrderHistory traderId={selectedTraderId} />
+          </div>
+        )}
         {/* 左侧结束 */}
 
         {/* 右侧：Recent Decisions - 卡片容器 */}

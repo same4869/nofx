@@ -2,6 +2,7 @@ package trader
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"nofx/decision"
@@ -35,13 +36,13 @@ type AutoTraderConfig struct {
 	BybitSecretKey string
 
 	// OKX API configuration
-	OKXAPIKey    string
-	OKXSecretKey string
+	OKXAPIKey     string
+	OKXSecretKey  string
 	OKXPassphrase string
 
 	// Bitget API configuration
-	BitgetAPIKey    string
-	BitgetSecretKey string
+	BitgetAPIKey     string
+	BitgetSecretKey  string
 	BitgetPassphrase string
 
 	// Hyperliquid configuration
@@ -123,6 +124,13 @@ type AutoTrader struct {
 	peakPnLCacheMutex     sync.RWMutex       // Cache read-write lock
 	lastBalanceSyncTime   time.Time          // Last balance sync time
 	userID                string             // User ID
+
+	riskStateMu sync.RWMutex
+	riskState   riskState
+
+	consecutiveMarketFailures int
+	consecutiveAIFailures     int
+	degradeUntil              time.Time
 }
 
 // NewAutoTrader creates an automatic trader
@@ -151,6 +159,11 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 	}
 
 	switch aiModel {
+	case "linkai":
+		mcpClient = mcp.NewLinkAIClient()
+		mcpClient.SetAPIKey(config.CustomAPIKey, config.CustomAPIURL, config.CustomModelName)
+		logger.Infof("🤖 [%s] Using LinkAI (OpenAI-compatible)", config.Name)
+
 	case "claude":
 		mcpClient = mcp.NewClaudeClient()
 		mcpClient.SetAPIKey(config.CustomAPIKey, config.CustomAPIURL, config.CustomModelName)
@@ -224,6 +237,18 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 	case "binance":
 		logger.Infof("🏦 [%s] Using Binance Futures trading", config.Name)
 		trader = NewFuturesTrader(config.BinanceAPIKey, config.BinanceSecretKey, userID)
+	case "paper":
+		logger.Infof("🧪 [%s] Using Paper (simulated perp) trading", config.Name)
+		tf := "1h"
+		if config.StrategyConfig != nil {
+			if strings.TrimSpace(config.StrategyConfig.Indicators.Klines.PrimaryTimeframe) != "" {
+				tf = config.StrategyConfig.Indicators.Klines.PrimaryTimeframe
+			}
+		}
+		trader, err = NewPaperTrader(st, config.ID, config.ExchangeID, config.InitialBalance, tf)
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize Paper trader: %w", err)
+		}
 	case "bybit":
 		logger.Infof("🏦 [%s] Using Bybit Futures trading", config.Name)
 		trader = NewBybitTrader(config.BybitAPIKey, config.BybitSecretKey)
@@ -313,7 +338,7 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 	strategyEngine := decision.NewStrategyEngine(config.StrategyConfig)
 	logger.Infof("✓ [%s] Using strategy engine (strategy configuration loaded)", config.Name)
 
-	return &AutoTrader{
+	at := &AutoTrader{
 		id:                    config.ID,
 		name:                  config.Name,
 		aiModel:               config.AIModel,
@@ -338,7 +363,10 @@ func NewAutoTrader(config AutoTraderConfig, st *store.Store, userID string) (*Au
 		peakPnLCacheMutex:     sync.RWMutex{},
 		lastBalanceSyncTime:   time.Now(),
 		userID:                userID,
-	}, nil
+	}
+
+	at.loadRiskState()
+	return at, nil
 }
 
 // Run runs the automatic trading main loop
@@ -359,6 +387,14 @@ func (at *AutoTrader) Run() error {
 
 	// Start drawdown monitoring
 	at.startDrawdownMonitor()
+
+	// Start Paper order sync if using paper exchange
+	if at.exchange == "paper" {
+		if paperTrader, ok := at.trader.(*PaperTrader); ok && at.store != nil {
+			paperTrader.StartOrderSync(at.id, at.exchangeID, at.exchange, at.store, 15*time.Second)
+			logger.Infof("🔄 [%s] Paper fill+position sync enabled (every 15s)", at.name)
+		}
+	}
 
 	// Start Lighter order sync if using Lighter exchange
 	if at.exchange == "lighter" {
@@ -465,6 +501,7 @@ func (at *AutoTrader) Stop() {
 // runCycle runs one trading cycle (using AI full decision-making)
 func (at *AutoTrader) runCycle() error {
 	at.callCount++
+	cycleStart := time.Now()
 
 	logger.Info("\n" + strings.Repeat("=", 70) + "\n")
 	logger.Infof("⏰ %s - AI decision cycle #%d", time.Now().Format("2006-01-02 15:04:05"), at.callCount)
@@ -488,9 +525,23 @@ func (at *AutoTrader) runCycle() error {
 	// 1. Check if trading needs to be stopped
 	if time.Now().Before(at.stopUntil) {
 		remaining := at.stopUntil.Sub(time.Now())
-		logger.Infof("⏸ Risk control: Trading paused, remaining %.0f minutes", remaining.Minutes())
+		reason := ""
+		at.riskStateMu.RLock()
+		if strings.TrimSpace(at.riskState.StopReason) != "" && strings.TrimSpace(at.riskState.StopUntil) != "" {
+			reason = at.riskState.StopReason
+		}
+		at.riskStateMu.RUnlock()
+		if reason != "" {
+			logger.Infof("⏸ Trading paused, remaining %.0f minutes (%s)", remaining.Minutes(), reason)
+		} else {
+			logger.Infof("⏸ Trading paused, remaining %.0f minutes", remaining.Minutes())
+		}
 		record.Success = false
-		record.ErrorMessage = fmt.Sprintf("Risk control paused, remaining %.0f minutes", remaining.Minutes())
+		if reason != "" {
+			record.ErrorMessage = fmt.Sprintf("Paused, remaining %.0f minutes (%s)", remaining.Minutes(), reason)
+		} else {
+			record.ErrorMessage = fmt.Sprintf("Paused, remaining %.0f minutes", remaining.Minutes())
+		}
 		at.saveDecision(record)
 		return nil
 	}
@@ -503,10 +554,19 @@ func (at *AutoTrader) runCycle() error {
 	}
 
 	// 4. Collect trading context
+	ctxStart := time.Now()
 	ctx, err := at.buildTradingContext()
+	buildCtxMs := time.Since(ctxStart).Milliseconds()
 	if err != nil {
+		at.consecutiveMarketFailures++
 		record.Success = false
 		record.ErrorMessage = fmt.Sprintf("Failed to build trading context: %v", err)
+		at.appendCycleMetrics(record, cycleMetrics{
+			Cycle:          at.callCount,
+			BuildContextMs: buildCtxMs,
+			TotalMs:        time.Since(cycleStart).Milliseconds(),
+			Failures:       1,
+		})
 		at.saveDecision(record)
 		return fmt.Errorf("failed to build trading context: %w", err)
 	}
@@ -522,9 +582,27 @@ func (at *AutoTrader) runCycle() error {
 	logger.Infof("📊 Account equity: %.2f USDT | Available: %.2f USDT | Positions: %d",
 		ctx.Account.TotalEquity, ctx.Account.AvailableBalance, ctx.Account.PositionCount)
 
+	// 4.5 Account-level risk gates (CODE ENFORCED)
+	if paused, reason := at.updateAndEnforceAccountRisk(record, ctx.Account.TotalEquity, ctx.Account.MarginUsedPct); paused {
+		logger.Infof("⏸ Risk control triggered: %s (pause until %s)", reason, at.stopUntil.UTC().Format(time.RFC3339))
+		record.Success = false
+		record.ErrorMessage = fmt.Sprintf("Risk control triggered: %s; paused until %s", reason, at.stopUntil.UTC().Format(time.RFC3339))
+		at.appendCycleMetrics(record, cycleMetrics{
+			Cycle:          at.callCount,
+			BuildContextMs: buildCtxMs,
+			CandidateCoins: len(ctx.CandidateCoins),
+			TotalMs:        time.Since(cycleStart).Milliseconds(),
+			Failures:       1,
+		})
+		at.saveDecision(record)
+		return nil
+	}
+
 	// 5. Use strategy engine to call AI for decision
 	logger.Infof("🤖 Requesting AI analysis and decision... [Strategy Engine]")
+	aiStart := time.Now()
 	aiDecision, err := decision.GetFullDecisionWithStrategy(ctx, at.mcpClient, at.strategyEngine, "balanced")
+	aiMs := time.Since(aiStart).Milliseconds()
 
 	if aiDecision != nil && aiDecision.AIRequestDurationMs > 0 {
 		record.AIRequestDurationMs = aiDecision.AIRequestDurationMs
@@ -546,6 +624,26 @@ func (at *AutoTrader) runCycle() error {
 	}
 
 	if err != nil {
+		// Basic degradation policy:
+		// - market data unavailable: enter degraded universe (BTC/ETH only) and short pause
+		// - AI failures: pause and let the system cool down
+		if errors.Is(err, decision.ErrMarketDataUnavailable) {
+			at.consecutiveMarketFailures++
+			at.consecutiveAIFailures = 0
+			if at.consecutiveMarketFailures >= 3 {
+				at.degradeUntil = time.Now().Add(2 * time.Hour)
+				at.stopUntil = time.Now().Add(10 * time.Minute)
+				record.ExecutionLog = append(record.ExecutionLog, "⚠️ Degrade: market data failures >=3, restrict universe to BTC/ETH for 2h, pause 10m")
+			}
+		} else {
+			at.consecutiveAIFailures++
+			at.consecutiveMarketFailures = 0
+			if at.consecutiveAIFailures >= 3 {
+				at.stopUntil = time.Now().Add(15 * time.Minute)
+				record.ExecutionLog = append(record.ExecutionLog, "⚠️ Degrade: AI failures >=3, pause 15m")
+			}
+		}
+
 		record.Success = false
 		record.ErrorMessage = fmt.Sprintf("Failed to get AI decision: %v", err)
 
@@ -566,9 +664,22 @@ func (at *AutoTrader) runCycle() error {
 			}
 		}
 
+		at.appendCycleMetrics(record, cycleMetrics{
+			Cycle:          at.callCount,
+			BuildContextMs: buildCtxMs,
+			AIDecisionMs:   aiMs,
+			CandidateCoins: len(ctx.CandidateCoins),
+			MarketDataOK:   len(ctx.MarketDataMap),
+			TotalMs:        time.Since(cycleStart).Milliseconds(),
+			Failures:       1,
+		})
 		at.saveDecision(record)
 		return fmt.Errorf("failed to get AI decision: %w", err)
 	}
+
+	// Success: reset failure streaks.
+	at.consecutiveAIFailures = 0
+	at.consecutiveMarketFailures = 0
 
 	// // 5. Print system prompt
 	// logger.Infof("\n" + strings.Repeat("=", 70))
@@ -617,6 +728,7 @@ func (at *AutoTrader) runCycle() error {
 	}
 
 	// Execute decisions and record results
+	execStart := time.Now()
 	for _, d := range sortedDecisions {
 		// Check if trader is stopped before each decision (allow immediate stop during execution)
 		at.isRunningMutex.RLock()
@@ -654,6 +766,19 @@ func (at *AutoTrader) runCycle() error {
 
 		record.Decisions = append(record.Decisions, actionRecord)
 	}
+
+	execMs := time.Since(execStart).Milliseconds()
+
+	at.appendCycleMetrics(record, cycleMetrics{
+		Cycle:          at.callCount,
+		BuildContextMs: buildCtxMs,
+		AIDecisionMs:   aiMs,
+		ExecuteMs:      execMs,
+		TotalMs:        time.Since(cycleStart).Milliseconds(),
+		CandidateCoins: len(ctx.CandidateCoins),
+		MarketDataOK:   len(ctx.MarketDataMap),
+		Decisions:      len(sortedDecisions),
+	})
 
 	// 9. Save decision record
 	if err := at.saveDecision(record); err != nil {
@@ -798,6 +923,31 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 	candidateCoins, err := at.strategyEngine.GetCandidateCoins()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get candidate coins: %w", err)
+	}
+
+	// Degrade mode: restrict universe to BTC/ETH for a period after repeated market failures,
+	// but always keep symbols that are currently in positions to ensure risk management works.
+	if !at.degradeUntil.IsZero() && time.Now().Before(at.degradeUntil) {
+		keep := map[string]bool{
+			"BTCUSDT": true,
+			"ETHUSDT": true,
+		}
+		for _, p := range positionInfos {
+			keep[market.Normalize(p.Symbol)] = true
+		}
+		filtered := make([]decision.CandidateCoin, 0, len(candidateCoins))
+		for _, c := range candidateCoins {
+			if keep[market.Normalize(c.Symbol)] {
+				filtered = append(filtered, c)
+			}
+		}
+		if len(filtered) > 0 && len(filtered) < len(candidateCoins) {
+			logger.Infof("⚠️ [%s] Degrade universe active until %s: %d -> %d candidates",
+				at.name, at.degradeUntil.UTC().Format(time.RFC3339), len(candidateCoins), len(filtered))
+			candidateCoins = filtered
+		}
+	} else if !at.degradeUntil.IsZero() && time.Now().After(at.degradeUntil) {
+		at.degradeUntil = time.Time{}
 	}
 	logger.Infof("📋 [%s] Strategy engine fetched candidate coins: %d", at.name, len(candidateCoins))
 
@@ -1032,6 +1182,46 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 		decision.PositionSizeUSD = adjustedPositionSize
 	}
 
+	// [CODE ENFORCED] Symbol concentration gate (cap by existing symbol notional)
+	if capped, cappedBySymbol, err := at.enforceSymbolConcentrationOnOpen(positions, equity, decision.Symbol, decision.PositionSizeUSD); err != nil {
+		return err
+	} else if cappedBySymbol {
+		prev := decision.PositionSizeUSD
+		logger.Infof("  ⚠️ [RISK CONTROL] Capped by symbol concentration: %.2f -> %.2f USDT", prev, capped)
+		actionRecord.Reasoning = strings.TrimSpace(fmt.Sprintf("%s | capped_by_symbol_concentration:%.2f->%.2f", actionRecord.Reasoning, prev, capped))
+		decision.PositionSizeUSD = capped
+	}
+
+	// [CODE ENFORCED] Max margin usage gate (cap position size if necessary)
+	if capped, cappedByMargin, err := at.enforceMaxMarginUsageOnOpen(positions, equity, decision.PositionSizeUSD, decision.Leverage); err != nil {
+		return err
+	} else if cappedByMargin {
+		prev := decision.PositionSizeUSD
+		logger.Infof("  ⚠️ [RISK CONTROL] Capped by MaxMarginUsage: %.2f -> %.2f USDT", prev, capped)
+		actionRecord.Reasoning = strings.TrimSpace(fmt.Sprintf("%s | capped_by_max_margin_usage:%.2f->%.2f", actionRecord.Reasoning, prev, capped))
+		decision.PositionSizeUSD = capped
+	}
+
+	// [CODE ENFORCED] Cap by AI-reported risk_usd (if enabled)
+	if capped, cappedByDecisionRisk, err := at.enforceDecisionRiskUSDOnOpen(decision.PositionSizeUSD, decision.RiskUSD); err != nil {
+		return err
+	} else if cappedByDecisionRisk {
+		prev := decision.PositionSizeUSD
+		logger.Infof("  ⚠️ [RISK CONTROL] Capped by decision risk_usd: %.2f -> %.2f USDT", prev, capped)
+		actionRecord.Reasoning = strings.TrimSpace(fmt.Sprintf("%s | capped_by_decision_risk_usd:%.2f->%.2f", actionRecord.Reasoning, prev, capped))
+		decision.PositionSizeUSD = capped
+	}
+
+	// [CODE ENFORCED] Max risk USD gate (cap by stop-loss distance)
+	if capped, cappedByRisk, err := at.enforceMaxRiskUSDOnOpen(decision.PositionSizeUSD, marketData.CurrentPrice, decision.StopLoss, "LONG"); err != nil {
+		return err
+	} else if cappedByRisk {
+		prev := decision.PositionSizeUSD
+		logger.Infof("  ⚠️ [RISK CONTROL] Capped by MaxRiskUSD: %.2f -> %.2f USDT", prev, capped)
+		actionRecord.Reasoning = strings.TrimSpace(fmt.Sprintf("%s | capped_by_max_risk_usd:%.2f->%.2f", actionRecord.Reasoning, prev, capped))
+		decision.PositionSizeUSD = capped
+	}
+
 	// ⚠️ Auto-adjust position size if insufficient margin
 	// Formula: totalRequired = positionSize/leverage + positionSize*0.001 + positionSize/leverage*0.01
 	//        = positionSize * (1.01/leverage + 0.001)
@@ -1085,11 +1275,21 @@ func (at *AutoTrader) executeOpenLongWithRecord(decision *decision.Decision, act
 	at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
 
 	// Set stop loss and take profit
-	if err := at.trader.SetStopLoss(decision.Symbol, "LONG", quantity, decision.StopLoss); err != nil {
-		logger.Infof("  ⚠ Failed to set stop loss: %v", err)
+	slErr := at.trader.SetStopLoss(decision.Symbol, "LONG", quantity, decision.StopLoss)
+	if slErr != nil {
+		logger.Infof("  ⚠ Failed to set stop loss: %v", slErr)
 	}
-	if err := at.trader.SetTakeProfit(decision.Symbol, "LONG", quantity, decision.TakeProfit); err != nil {
-		logger.Infof("  ⚠ Failed to set take profit: %v", err)
+	tpErr := at.trader.SetTakeProfit(decision.Symbol, "LONG", quantity, decision.TakeProfit)
+	if tpErr != nil {
+		logger.Infof("  ⚠ Failed to set take profit: %v", tpErr)
+	}
+
+	// [CODE ENFORCED] Rollback semantics if protection is required.
+	if at.config.StrategyConfig != nil && at.config.StrategyConfig.RiskControl.RequireProtection && (slErr != nil || tpErr != nil) {
+		_ = at.trader.CancelAllOrders(decision.Symbol)
+		// Best-effort: if a position is already opened (live), try to close it.
+		_, _ = at.trader.CloseLong(decision.Symbol, 0)
+		return fmt.Errorf("❌ [RISK CONTROL] Protection required but failed to set SL/TP (sl=%v, tp=%v); rollback applied", slErr, tpErr)
 	}
 
 	return nil
@@ -1149,6 +1349,46 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 		decision.PositionSizeUSD = adjustedPositionSize
 	}
 
+	// [CODE ENFORCED] Symbol concentration gate (cap by existing symbol notional)
+	if capped, cappedBySymbol, err := at.enforceSymbolConcentrationOnOpen(positions, equity, decision.Symbol, decision.PositionSizeUSD); err != nil {
+		return err
+	} else if cappedBySymbol {
+		prev := decision.PositionSizeUSD
+		logger.Infof("  ⚠️ [RISK CONTROL] Capped by symbol concentration: %.2f -> %.2f USDT", prev, capped)
+		actionRecord.Reasoning = strings.TrimSpace(fmt.Sprintf("%s | capped_by_symbol_concentration:%.2f->%.2f", actionRecord.Reasoning, prev, capped))
+		decision.PositionSizeUSD = capped
+	}
+
+	// [CODE ENFORCED] Max margin usage gate (cap position size if necessary)
+	if capped, cappedByMargin, err := at.enforceMaxMarginUsageOnOpen(positions, equity, decision.PositionSizeUSD, decision.Leverage); err != nil {
+		return err
+	} else if cappedByMargin {
+		prev := decision.PositionSizeUSD
+		logger.Infof("  ⚠️ [RISK CONTROL] Capped by MaxMarginUsage: %.2f -> %.2f USDT", prev, capped)
+		actionRecord.Reasoning = strings.TrimSpace(fmt.Sprintf("%s | capped_by_max_margin_usage:%.2f->%.2f", actionRecord.Reasoning, prev, capped))
+		decision.PositionSizeUSD = capped
+	}
+
+	// [CODE ENFORCED] Cap by AI-reported risk_usd (if enabled)
+	if capped, cappedByDecisionRisk, err := at.enforceDecisionRiskUSDOnOpen(decision.PositionSizeUSD, decision.RiskUSD); err != nil {
+		return err
+	} else if cappedByDecisionRisk {
+		prev := decision.PositionSizeUSD
+		logger.Infof("  ⚠️ [RISK CONTROL] Capped by decision risk_usd: %.2f -> %.2f USDT", prev, capped)
+		actionRecord.Reasoning = strings.TrimSpace(fmt.Sprintf("%s | capped_by_decision_risk_usd:%.2f->%.2f", actionRecord.Reasoning, prev, capped))
+		decision.PositionSizeUSD = capped
+	}
+
+	// [CODE ENFORCED] Max risk USD gate (cap by stop-loss distance)
+	if capped, cappedByRisk, err := at.enforceMaxRiskUSDOnOpen(decision.PositionSizeUSD, marketData.CurrentPrice, decision.StopLoss, "SHORT"); err != nil {
+		return err
+	} else if cappedByRisk {
+		prev := decision.PositionSizeUSD
+		logger.Infof("  ⚠️ [RISK CONTROL] Capped by MaxRiskUSD: %.2f -> %.2f USDT", prev, capped)
+		actionRecord.Reasoning = strings.TrimSpace(fmt.Sprintf("%s | capped_by_max_risk_usd:%.2f->%.2f", actionRecord.Reasoning, prev, capped))
+		decision.PositionSizeUSD = capped
+	}
+
 	// ⚠️ Auto-adjust position size if insufficient margin
 	// Formula: totalRequired = positionSize/leverage + positionSize*0.001 + positionSize/leverage*0.01
 	//        = positionSize * (1.01/leverage + 0.001)
@@ -1202,11 +1442,21 @@ func (at *AutoTrader) executeOpenShortWithRecord(decision *decision.Decision, ac
 	at.positionFirstSeenTime[posKey] = time.Now().UnixMilli()
 
 	// Set stop loss and take profit
-	if err := at.trader.SetStopLoss(decision.Symbol, "SHORT", quantity, decision.StopLoss); err != nil {
-		logger.Infof("  ⚠ Failed to set stop loss: %v", err)
+	slErr := at.trader.SetStopLoss(decision.Symbol, "SHORT", quantity, decision.StopLoss)
+	if slErr != nil {
+		logger.Infof("  ⚠ Failed to set stop loss: %v", slErr)
 	}
-	if err := at.trader.SetTakeProfit(decision.Symbol, "SHORT", quantity, decision.TakeProfit); err != nil {
-		logger.Infof("  ⚠ Failed to set take profit: %v", err)
+	tpErr := at.trader.SetTakeProfit(decision.Symbol, "SHORT", quantity, decision.TakeProfit)
+	if tpErr != nil {
+		logger.Infof("  ⚠ Failed to set take profit: %v", tpErr)
+	}
+
+	// [CODE ENFORCED] Rollback semantics if protection is required.
+	if at.config.StrategyConfig != nil && at.config.StrategyConfig.RiskControl.RequireProtection && (slErr != nil || tpErr != nil) {
+		_ = at.trader.CancelAllOrders(decision.Symbol)
+		// Best-effort: if a position is already opened (live), try to close it.
+		_, _ = at.trader.CloseShort(decision.Symbol, 0)
+		return fmt.Errorf("❌ [RISK CONTROL] Protection required but failed to set SL/TP (sl=%v, tp=%v); rollback applied", slErr, tpErr)
 	}
 
 	return nil
@@ -1861,7 +2111,7 @@ func (at *AutoTrader) recordAndConfirmOrder(orderResult map[string]interface{}, 
 	// Exchanges with OrderSync: Skip immediate order recording, let OrderSync handle it
 	// This ensures accurate data from GetTrades API and avoids duplicate records
 	switch at.exchange {
-	case "binance", "lighter", "hyperliquid", "bybit", "okx", "bitget", "aster":
+	case "binance", "lighter", "hyperliquid", "bybit", "okx", "bitget", "aster", "paper":
 		logger.Infof("  📝 Order submitted (id: %s), will be synced by OrderSync", orderID)
 		return
 	}
@@ -2056,22 +2306,22 @@ func (at *AutoTrader) recordOrderFill(orderRecordID int64, exchangeOrderID, symb
 	normalizedSymbol := market.Normalize(symbol)
 
 	fill := &store.TraderFill{
-		TraderID:         at.id,
-		ExchangeID:       at.exchangeID,
-		ExchangeType:     at.exchange,
-		OrderID:          orderRecordID,
-		ExchangeOrderID:  exchangeOrderID,
-		ExchangeTradeID:  tradeID,
-		Symbol:           normalizedSymbol,
-		Side:             side,
-		Price:            price,
-		Quantity:         quantity,
-		QuoteQuantity:    price * quantity,
-		Commission:       fee,
-		CommissionAsset:  "USDT",
-		RealizedPnL:      0, // Will be calculated for close orders
-		IsMaker:          false, // Market orders are usually taker
-		CreatedAt:        time.Now(),
+		TraderID:        at.id,
+		ExchangeID:      at.exchangeID,
+		ExchangeType:    at.exchange,
+		OrderID:         orderRecordID,
+		ExchangeOrderID: exchangeOrderID,
+		ExchangeTradeID: tradeID,
+		Symbol:          normalizedSymbol,
+		Side:            side,
+		Price:           price,
+		Quantity:        quantity,
+		QuoteQuantity:   price * quantity,
+		Commission:      fee,
+		CommissionAsset: "USDT",
+		RealizedPnL:     0,     // Will be calculated for close orders
+		IsMaker:         false, // Market orders are usually taker
+		CreatedAt:       time.Now(),
 	}
 
 	// Calculate realized PnL for close orders
@@ -2183,6 +2433,197 @@ func (at *AutoTrader) enforceMaxPositions(currentPositionCount int) error {
 	return nil
 }
 
+// enforceMaxMarginUsageOnOpen caps or rejects the new position size so that
+// (currentMarginUsed + newPositionMargin) / equity <= MaxMarginUsage.
+func (at *AutoTrader) enforceMaxMarginUsageOnOpen(positions []map[string]interface{}, equity float64, positionSizeUSD float64, leverage int) (float64, bool, error) {
+	if at.config.StrategyConfig == nil {
+		return positionSizeUSD, false, nil
+	}
+
+	riskControl := at.config.StrategyConfig.RiskControl
+	maxMarginUsage := riskControl.MaxMarginUsage
+	if maxMarginUsage <= 0 {
+		maxMarginUsage = 0.9
+	}
+	if equity <= 0 || leverage <= 0 {
+		return positionSizeUSD, false, nil
+	}
+
+	totalMarginUsed := 0.0
+	for _, pos := range positions {
+		markPrice, ok := pos["markPrice"].(float64)
+		if !ok {
+			continue
+		}
+		qty, ok := pos["positionAmt"].(float64)
+		if !ok {
+			continue
+		}
+		if qty < 0 {
+			qty = -qty
+		}
+		lev := 10.0
+		if v, ok := pos["leverage"].(float64); ok && v > 0 {
+			lev = v
+		}
+		totalMarginUsed += (qty * markPrice) / lev
+	}
+
+	// New position margin requirement (ignore fees here; this is a hard safety gate).
+	newMargin := positionSizeUSD / float64(leverage)
+	newUsage := (totalMarginUsed + newMargin) / equity
+
+	if newUsage <= maxMarginUsage {
+		return positionSizeUSD, false, nil
+	}
+
+	allowedExtraMargin := maxMarginUsage*equity - totalMarginUsed
+	if allowedExtraMargin <= 0 {
+		return 0, false, fmt.Errorf("❌ [RISK CONTROL] MaxMarginUsage %.0f%% reached (current %.2f%%), cannot open new positions",
+			maxMarginUsage*100, (totalMarginUsed/equity)*100)
+	}
+
+	maxNotional := allowedExtraMargin * float64(leverage)
+	if maxNotional <= 0 {
+		return 0, false, fmt.Errorf("❌ [RISK CONTROL] MaxMarginUsage %.0f%% leaves no room for new positions", maxMarginUsage*100)
+	}
+
+	// Leave a small buffer.
+	maxNotional *= 0.98
+
+	if positionSizeUSD > maxNotional {
+		return maxNotional, true, nil
+	}
+	return positionSizeUSD, false, nil
+}
+
+// enforceSymbolConcentrationOnOpen ensures total notional for a symbol stays within equity×ratio.
+// It accounts for existing positions on the same symbol (both long/short) by summing absolute notionals.
+func (at *AutoTrader) enforceSymbolConcentrationOnOpen(positions []map[string]interface{}, equity float64, symbol string, positionSizeUSD float64) (float64, bool, error) {
+	if at.config.StrategyConfig == nil {
+		return positionSizeUSD, false, nil
+	}
+	if equity <= 0 {
+		return positionSizeUSD, false, nil
+	}
+
+	riskControl := at.config.StrategyConfig.RiskControl
+
+	// Reuse the same ratio semantics as enforcePositionValueRatio.
+	var maxPositionValueRatio float64
+	if isBTCETH(symbol) {
+		maxPositionValueRatio = riskControl.BTCETHMaxPositionValueRatio
+		if maxPositionValueRatio <= 0 {
+			maxPositionValueRatio = 5.0
+		}
+	} else {
+		maxPositionValueRatio = riskControl.AltcoinMaxPositionValueRatio
+		if maxPositionValueRatio <= 0 {
+			maxPositionValueRatio = 1.0
+		}
+	}
+	maxPositionValue := equity * maxPositionValueRatio
+
+	normalized := market.Normalize(symbol)
+	currentNotional := 0.0
+	for _, pos := range positions {
+		sym, ok := pos["symbol"].(string)
+		if !ok {
+			continue
+		}
+		if market.Normalize(sym) != normalized {
+			continue
+		}
+		markPrice, ok := pos["markPrice"].(float64)
+		if !ok || markPrice <= 0 {
+			continue
+		}
+		qty, ok := pos["positionAmt"].(float64)
+		if !ok {
+			continue
+		}
+		if qty < 0 {
+			qty = -qty
+		}
+		currentNotional += qty * markPrice
+	}
+
+	remaining := maxPositionValue - currentNotional
+	if remaining <= 0 {
+		return 0, false, fmt.Errorf("❌ [RISK CONTROL] Symbol concentration reached for %s (used %.2f / max %.2f)", symbol, currentNotional, maxPositionValue)
+	}
+
+	if positionSizeUSD > remaining {
+		return remaining * 0.98, true, nil
+	}
+	return positionSizeUSD, false, nil
+}
+
+// enforceDecisionRiskUSDOnOpen caps position size by AI-reported risk_usd (if enabled).
+func (at *AutoTrader) enforceDecisionRiskUSDOnOpen(positionSizeUSD float64, decisionRiskUSD float64) (float64, bool, error) {
+	if at.config.StrategyConfig == nil {
+		return positionSizeUSD, false, nil
+	}
+	maxRiskUSD := at.config.StrategyConfig.RiskControl.MaxRiskUSD
+	if maxRiskUSD <= 0 {
+		return positionSizeUSD, false, nil
+	}
+	if decisionRiskUSD <= 0 {
+		return 0, false, fmt.Errorf("❌ [RISK CONTROL] risk_usd is required when MaxRiskUSD is enabled (max=%.2f)", maxRiskUSD)
+	}
+	if decisionRiskUSD <= maxRiskUSD {
+		return positionSizeUSD, false, nil
+	}
+	scale := maxRiskUSD / decisionRiskUSD
+	if scale <= 0 {
+		return 0, false, fmt.Errorf("❌ [RISK CONTROL] MaxRiskUSD too small to open position (max=%.2f)", maxRiskUSD)
+	}
+	return positionSizeUSD * scale * 0.98, true, nil
+}
+
+// enforceMaxRiskUSDOnOpen caps position size so that implied risk from stop-loss <= MaxRiskUSD.
+// If MaxRiskUSD <= 0, this check is disabled.
+func (at *AutoTrader) enforceMaxRiskUSDOnOpen(positionSizeUSD float64, entryPrice float64, stopLoss float64, positionSide string) (float64, bool, error) {
+	if at.config.StrategyConfig == nil {
+		return positionSizeUSD, false, nil
+	}
+	maxRiskUSD := at.config.StrategyConfig.RiskControl.MaxRiskUSD
+	if maxRiskUSD <= 0 {
+		return positionSizeUSD, false, nil
+	}
+	if entryPrice <= 0 || positionSizeUSD <= 0 {
+		return positionSizeUSD, false, nil
+	}
+
+	side := strings.ToUpper(strings.TrimSpace(positionSide))
+	if side != "LONG" && side != "SHORT" {
+		return positionSizeUSD, false, fmt.Errorf("invalid positionSide: %s", positionSide)
+	}
+
+	stopDist := 0.0
+	if side == "LONG" {
+		stopDist = entryPrice - stopLoss
+	} else {
+		stopDist = stopLoss - entryPrice
+	}
+	if stopDist <= 0 {
+		return 0, false, fmt.Errorf("❌ [RISK CONTROL] Invalid stop_loss for %s: entry=%.6f, stop=%.6f", side, entryPrice, stopLoss)
+	}
+
+	qty := positionSizeUSD / entryPrice
+	impliedRisk := qty * stopDist
+	if impliedRisk <= maxRiskUSD {
+		return positionSizeUSD, false, nil
+	}
+
+	scale := maxRiskUSD / impliedRisk
+	if scale <= 0 {
+		return 0, false, fmt.Errorf("❌ [RISK CONTROL] MaxRiskUSD too small to open position (max=%.2f)", maxRiskUSD)
+	}
+	capped := positionSizeUSD * scale * 0.98
+	return capped, true, nil
+}
+
 // getSideFromAction converts order action to side (BUY/SELL)
 func getSideFromAction(action string) string {
 	switch action {
@@ -2194,4 +2635,3 @@ func getSideFromAction(action string) string {
 		return "BUY"
 	}
 }
-

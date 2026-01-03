@@ -37,6 +37,16 @@ export function RiskControlEditor({
       minRiskRewardDesc: { zh: '开仓要求的最低盈亏比', en: 'Minimum profit ratio for opening' },
       maxMarginUsage: { zh: '最大保证金使用率（代码强制）', en: 'Max Margin Usage (CODE ENFORCED)' },
       maxMarginUsageDesc: { zh: '保证金使用率上限，由代码强制执行', en: 'Maximum margin utilization, enforced by code' },
+      dailyLossLimit: { zh: '日内亏损熔断（代码强制）', en: 'Daily Loss Circuit (CODE ENFORCED)' },
+      dailyLossLimitDesc: { zh: '当净值相对当日起始净值下跌超过阈值，触发冷静期并停止交易', en: 'Pause trading when equity drops beyond threshold vs daily start equity' },
+      maxDrawdown: { zh: '最大回撤熔断（代码强制）', en: 'Max Drawdown Circuit (CODE ENFORCED)' },
+      maxDrawdownDesc: { zh: '当净值相对历史峰值回撤超过阈值，触发冷静期并停止交易', en: 'Pause trading when drawdown from peak equity exceeds threshold' },
+      cooldownMinutes: { zh: '冷静期（分钟）', en: 'Cooldown (minutes)' },
+      cooldownMinutesDesc: { zh: '熔断触发后暂停交易的时长', en: 'How long to pause after a circuit breaker triggers' },
+      maxRiskUSD: { zh: '单笔最大风险（USDT，代码强制）', en: 'Max Risk per Trade (USDT, CODE ENFORCED)' },
+      maxRiskUSDDesc: { zh: 'AI 输出的 risk_usd 不得超过该值（0=关闭）', en: 'Decision risk_usd must not exceed this (0=disabled)' },
+      requireProtection: { zh: '强制保护（SL/TP）', en: 'Require Protection (SL/TP)' },
+      requireProtectionDesc: { zh: '如果开仓后无法成功设置止损/止盈，则回滚平仓（尽力而为）', en: 'Rollback if stop-loss/take-profit cannot be set (best-effort)' },
       entryRequirements: { zh: '开仓要求', en: 'Entry Requirements' },
       minPositionSize: { zh: '最小开仓金额', en: 'Min Position Size' },
       minPositionSizeDesc: { zh: 'USDT 最小名义价值', en: 'Minimum notional value in USDT' },
@@ -297,7 +307,7 @@ export function RiskControlEditor({
             <div className="flex items-center gap-2">
               <input
                 type="range"
-                value={(config.max_margin_usage ?? 0.9) * 100}
+                value={(config.max_margin_usage ?? 0.3) * 100}
                 onChange={(e) =>
                   updateField('max_margin_usage', parseInt(e.target.value) / 100)
                 }
@@ -307,10 +317,161 @@ export function RiskControlEditor({
                 className="flex-1 accent-green-500"
               />
               <span className="w-12 text-center font-mono" style={{ color: '#0ECB81' }}>
-                {Math.round((config.max_margin_usage ?? 0.9) * 100)}%
+                {Math.round((config.max_margin_usage ?? 0.3) * 100)}%
               </span>
             </div>
           </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-4 mt-4">
+          <div
+            className="p-4 rounded-lg"
+            style={{ background: '#0B0E11', border: '1px solid #2B3139' }}
+          >
+            <label className="block text-sm mb-1" style={{ color: '#EAECEF' }}>
+              {t('dailyLossLimit')}
+            </label>
+            <p className="text-xs mb-2" style={{ color: '#848E9C' }}>
+              {t('dailyLossLimitDesc')}
+            </p>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                value={((config.daily_loss_limit ?? 0) * 100).toFixed(1)}
+                onChange={(e) =>
+                  updateField('daily_loss_limit', (parseFloat(e.target.value) || 0) / 100)
+                }
+                disabled={disabled}
+                min={0}
+                max={50}
+                step={0.5}
+                className="w-24 px-3 py-2 rounded"
+                style={{
+                  background: '#1E2329',
+                  border: '1px solid #2B3139',
+                  color: '#EAECEF',
+                }}
+              />
+              <span style={{ color: '#848E9C' }}>% (0=off)</span>
+            </div>
+          </div>
+
+          <div
+            className="p-4 rounded-lg"
+            style={{ background: '#0B0E11', border: '1px solid #2B3139' }}
+          >
+            <label className="block text-sm mb-1" style={{ color: '#EAECEF' }}>
+              {t('maxDrawdown')}
+            </label>
+            <p className="text-xs mb-2" style={{ color: '#848E9C' }}>
+              {t('maxDrawdownDesc')}
+            </p>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                value={((config.max_drawdown ?? 0) * 100).toFixed(1)}
+                onChange={(e) =>
+                  updateField('max_drawdown', (parseFloat(e.target.value) || 0) / 100)
+                }
+                disabled={disabled}
+                min={0}
+                max={80}
+                step={0.5}
+                className="w-24 px-3 py-2 rounded"
+                style={{
+                  background: '#1E2329',
+                  border: '1px solid #2B3139',
+                  color: '#EAECEF',
+                }}
+              />
+              <span style={{ color: '#848E9C' }}>% (0=off)</span>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 gap-4 mt-4">
+          <div
+            className="p-4 rounded-lg"
+            style={{ background: '#0B0E11', border: '1px solid #2B3139' }}
+          >
+            <label className="block text-sm mb-1" style={{ color: '#EAECEF' }}>
+              {t('cooldownMinutes')}
+            </label>
+            <p className="text-xs mb-2" style={{ color: '#848E9C' }}>
+              {t('cooldownMinutesDesc')}
+            </p>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                value={config.stop_cooldown_minutes ?? 360}
+                onChange={(e) =>
+                  updateField('stop_cooldown_minutes', parseInt(e.target.value) || 0)
+                }
+                disabled={disabled}
+                min={0}
+                max={1440}
+                className="w-24 px-3 py-2 rounded"
+                style={{
+                  background: '#1E2329',
+                  border: '1px solid #2B3139',
+                  color: '#EAECEF',
+                }}
+              />
+              <span style={{ color: '#848E9C' }}>min</span>
+            </div>
+          </div>
+
+          <div
+            className="p-4 rounded-lg"
+            style={{ background: '#0B0E11', border: '1px solid #2B3139' }}
+          >
+            <label className="block text-sm mb-1" style={{ color: '#EAECEF' }}>
+              {t('maxRiskUSD')}
+            </label>
+            <p className="text-xs mb-2" style={{ color: '#848E9C' }}>
+              {t('maxRiskUSDDesc')}
+            </p>
+            <div className="flex items-center gap-2">
+              <input
+                type="number"
+                value={config.max_risk_usd ?? 0}
+                onChange={(e) =>
+                  updateField('max_risk_usd', parseFloat(e.target.value) || 0)
+                }
+                disabled={disabled}
+                min={0}
+                max={100000}
+                className="w-32 px-3 py-2 rounded"
+                style={{
+                  background: '#1E2329',
+                  border: '1px solid #2B3139',
+                  color: '#EAECEF',
+                }}
+              />
+              <span style={{ color: '#848E9C' }}>USDT</span>
+            </div>
+          </div>
+        </div>
+
+        <div
+          className="p-4 rounded-lg mt-4"
+          style={{ background: '#0B0E11', border: '1px solid #2B3139' }}
+        >
+          <label className="block text-sm mb-1" style={{ color: '#EAECEF' }}>
+            {t('requireProtection')}
+          </label>
+          <p className="text-xs mb-2" style={{ color: '#848E9C' }}>
+            {t('requireProtectionDesc')}
+          </p>
+          <label className="inline-flex items-center gap-2">
+            <input
+              type="checkbox"
+              checked={config.require_protection ?? false}
+              onChange={(e) => updateField('require_protection', e.target.checked)}
+              disabled={disabled}
+            />
+            <span style={{ color: '#EAECEF' }}>{(config.require_protection ?? false) ? 'ON' : 'OFF'}</span>
+          </label>
         </div>
       </div>
 

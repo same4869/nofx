@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import type { DecisionRecord, DecisionAction } from '../types'
 import { t, type Language } from '../i18n/translations'
 
@@ -40,6 +40,92 @@ function getConfidenceColor(confidence: number | undefined): string {
   if (confidence >= 80) return '#0ECB81'
   if (confidence >= 60) return '#F0B90B'
   return '#F6465D'
+}
+
+type RiskSnapshot = {
+  type?: string
+  trader_id?: string
+  exchange_id?: string
+  time_utc?: string
+  equity?: number
+  margin_used_pct?: number
+  daily_date?: string
+  daily_start_equity?: number
+  daily_loss_pct?: number
+  daily_realized_pnl?: number
+  equity_peak?: number
+  drawdown_pct?: number
+  stop_until_utc?: string
+  stop_reason?: string
+  limits?: {
+    max_margin_usage?: number
+    daily_loss_limit?: number
+    max_drawdown?: number
+    cooldown_minutes?: number
+  }
+}
+
+type CycleMetrics = {
+  type?: string
+  trader_id?: string
+  cycle?: number
+  time_utc?: string
+  exchange?: string
+  exchange_id?: string
+  build_context_ms?: number
+  ai_decision_ms?: number
+  execute_ms?: number
+  total_ms?: number
+  candidate_coins?: number
+  market_data_ok?: number
+  decisions?: number
+  failures?: number
+}
+
+function formatPctRatio(ratio: number | undefined): string {
+  if (ratio === undefined || Number.isNaN(ratio)) return '-'
+  return `${(ratio * 100).toFixed(2)}%`
+}
+
+function formatPct(pct: number | undefined): string {
+  if (pct === undefined || Number.isNaN(pct)) return '-'
+  return `${pct.toFixed(2)}%`
+}
+
+function formatMoney(v: number | undefined): string {
+  if (v === undefined || Number.isNaN(v)) return '-'
+  return v.toFixed(2)
+}
+
+function riskT(key: string, language: Language): string {
+  const zh: Record<string, string> = {
+    riskSnapshot: '风控快照',
+    equity: '净值',
+    marginUsed: '保证金使用率',
+    dailyLoss: '日内亏损',
+    drawdown: '最大回撤(当前)',
+    circuits: '熔断/闸门',
+    stopUntil: '冷静期到',
+    reason: '触发原因',
+    limit: '阈值',
+  }
+  const en: Record<string, string> = {
+    riskSnapshot: 'Risk Snapshot',
+    equity: 'Equity',
+    marginUsed: 'Margin Used',
+    dailyLoss: 'Daily Loss',
+    drawdown: 'Drawdown (current)',
+    circuits: 'Circuits / Gates',
+    stopUntil: 'Stop Until',
+    reason: 'Reason',
+    limit: 'Limit',
+  }
+  return (language === 'zh' ? zh : en)[key] || key
+}
+
+function formatMs(v: number | undefined): string {
+  if (v === undefined || Number.isNaN(v)) return '-'
+  return `${Math.round(v)}ms`
 }
 
 // Single Action Card Component
@@ -221,6 +307,42 @@ export function DecisionCard({ decision, language, onSymbolClick }: DecisionCard
   const [showSystemPrompt, setShowSystemPrompt] = useState(false)
   const [showInputPrompt, setShowInputPrompt] = useState(false)
   const [showCoT, setShowCoT] = useState(false)
+  const [showRawExecutionLog, setShowRawExecutionLog] = useState(false)
+
+  const { riskSnapshot, cycleMetrics, nonRiskLogs } = useMemo(() => {
+    const logs = decision.execution_log || []
+    const riskLogs = logs.filter((l) => l.startsWith('RISK:'))
+    const metricLogs = logs.filter((l) => l.startsWith('METRIC:'))
+    const nonRisk = logs.filter((l) => !l.startsWith('RISK:'))
+    const last = riskLogs.length > 0 ? riskLogs[riskLogs.length - 1] : ''
+    const lastMetric = metricLogs.length > 0 ? metricLogs[metricLogs.length - 1] : ''
+
+    let parsedRisk: RiskSnapshot | null = null
+    if (last) {
+      try {
+        parsedRisk = JSON.parse(last.slice('RISK:'.length)) as RiskSnapshot
+      } catch {
+        parsedRisk = null
+      }
+    }
+
+    let parsedMetric: CycleMetrics | null = null
+    if (lastMetric) {
+      try {
+        parsedMetric = JSON.parse(lastMetric.slice('METRIC:'.length)) as CycleMetrics
+      } catch {
+        parsedMetric = null
+      }
+    }
+
+    const filtered = nonRisk.filter((l) => !l.startsWith('METRIC:'))
+
+    return {
+      riskSnapshot: parsedRisk,
+      cycleMetrics: parsedMetric,
+      nonRiskLogs: filtered,
+    }
+  }, [decision.execution_log])
 
   // Copy text to clipboard
   const copyToClipboard = async (text: string, label: string) => {
@@ -449,13 +571,183 @@ export function DecisionCard({ decision, language, onSymbolClick }: DecisionCard
         )}
       </div>
 
+      {/* Risk Snapshot (structured) */}
+      {riskSnapshot && (
+        <div
+          className="rounded-lg p-4 mt-4"
+          style={{
+            background: '#0B0E11',
+            border: riskSnapshot.stop_reason ? '1px solid rgba(246, 70, 93, 0.4)' : '1px solid #2B3139',
+          }}
+        >
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <span className="text-base">🛡️</span>
+              <span className="font-semibold" style={{ color: '#EAECEF' }}>
+                {riskT('riskSnapshot', language)}
+              </span>
+              <span className="text-xs" style={{ color: '#848E9C' }}>
+                {riskSnapshot.time_utc ? new Date(riskSnapshot.time_utc).toLocaleString() : ''}
+              </span>
+            </div>
+            {riskSnapshot.stop_reason ? (
+              <span
+                className="px-2 py-1 rounded text-xs font-semibold"
+                style={{ background: 'rgba(246, 70, 93, 0.15)', color: '#F6465D', border: '1px solid rgba(246, 70, 93, 0.3)' }}
+              >
+                PAUSED
+              </span>
+            ) : (
+              <span
+                className="px-2 py-1 rounded text-xs font-semibold"
+                style={{ background: 'rgba(14, 203, 129, 0.15)', color: '#0ECB81', border: '1px solid rgba(14, 203, 129, 0.3)' }}
+              >
+                OK
+              </span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-4 gap-3">
+            <div className="text-center">
+              <div className="text-xs mb-1" style={{ color: '#848E9C' }}>{riskT('equity', language)}</div>
+              <div className="font-mono font-semibold" style={{ color: '#EAECEF' }}>{formatMoney(riskSnapshot.equity)}</div>
+            </div>
+            <div className="text-center">
+              <div className="text-xs mb-1" style={{ color: '#848E9C' }}>{riskT('marginUsed', language)}</div>
+              <div className="font-mono font-semibold" style={{ color: '#F0B90B' }}>{formatPct(riskSnapshot.margin_used_pct)}</div>
+              <div className="text-[10px] mt-0.5" style={{ color: '#848E9C' }}>
+                {riskT('limit', language)} {riskSnapshot.limits?.max_margin_usage ? formatPctRatio(riskSnapshot.limits.max_margin_usage) : '-'}
+              </div>
+            </div>
+            <div className="text-center">
+              <div className="text-xs mb-1" style={{ color: '#848E9C' }}>{riskT('dailyLoss', language)}</div>
+              <div className="font-mono font-semibold" style={{ color: '#F6465D' }}>{formatPctRatio(riskSnapshot.daily_loss_pct)}</div>
+              <div className="text-[10px] mt-0.5" style={{ color: '#848E9C' }}>
+                {riskT('limit', language)} {riskSnapshot.limits?.daily_loss_limit ? formatPctRatio(riskSnapshot.limits.daily_loss_limit) : '-'}
+              </div>
+            </div>
+            <div className="text-center">
+              <div className="text-xs mb-1" style={{ color: '#848E9C' }}>{riskT('drawdown', language)}</div>
+              <div className="font-mono font-semibold" style={{ color: '#F6465D' }}>{formatPctRatio(riskSnapshot.drawdown_pct)}</div>
+              <div className="text-[10px] mt-0.5" style={{ color: '#848E9C' }}>
+                {riskT('limit', language)} {riskSnapshot.limits?.max_drawdown ? formatPctRatio(riskSnapshot.limits.max_drawdown) : '-'}
+              </div>
+            </div>
+          </div>
+
+          {(riskSnapshot.stop_until_utc || riskSnapshot.stop_reason) && (
+            <div className="mt-3 pt-3" style={{ borderTop: '1px solid #2B3139' }}>
+              {riskSnapshot.stop_until_utc && (
+                <div className="text-xs" style={{ color: '#EAECEF' }}>
+                  ⏸ {riskT('stopUntil', language)}: <span className="font-mono">{riskSnapshot.stop_until_utc}</span>
+                </div>
+              )}
+              {riskSnapshot.stop_reason && (
+                <div className="text-xs mt-1" style={{ color: '#F6465D' }}>
+                  ❌ {riskT('reason', language)}: {riskSnapshot.stop_reason}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Cycle Metrics (structured) */}
+      {cycleMetrics && (
+        <div
+          className="rounded-lg p-4 mt-4"
+          style={{
+            background: '#0B0E11',
+            border: '1px solid #2B3139',
+          }}
+        >
+          <div className="flex items-center justify-between mb-3">
+            <div className="flex items-center gap-2">
+              <span className="text-base">⏱️</span>
+              <span className="font-semibold" style={{ color: '#EAECEF' }}>
+                Cycle Metrics
+              </span>
+              <span className="text-xs" style={{ color: '#848E9C' }}>
+                {cycleMetrics.time_utc ? new Date(cycleMetrics.time_utc).toLocaleString() : ''}
+              </span>
+            </div>
+            {cycleMetrics.failures && cycleMetrics.failures > 0 ? (
+              <span
+                className="px-2 py-1 rounded text-xs font-semibold"
+                style={{ background: 'rgba(246, 70, 93, 0.15)', color: '#F6465D', border: '1px solid rgba(246, 70, 93, 0.3)' }}
+              >
+                FAIL
+              </span>
+            ) : (
+              <span
+                className="px-2 py-1 rounded text-xs font-semibold"
+                style={{ background: 'rgba(14, 203, 129, 0.15)', color: '#0ECB81', border: '1px solid rgba(14, 203, 129, 0.3)' }}
+              >
+                OK
+              </span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-4 gap-3">
+            <div className="text-center">
+              <div className="text-xs mb-1" style={{ color: '#848E9C' }}>Build Ctx</div>
+              <div className="font-mono font-semibold" style={{ color: '#EAECEF' }}>{formatMs(cycleMetrics.build_context_ms)}</div>
+            </div>
+            <div className="text-center">
+              <div className="text-xs mb-1" style={{ color: '#848E9C' }}>AI+Market</div>
+              <div className="font-mono font-semibold" style={{ color: '#F0B90B' }}>{formatMs(cycleMetrics.ai_decision_ms)}</div>
+            </div>
+            <div className="text-center">
+              <div className="text-xs mb-1" style={{ color: '#848E9C' }}>Execute</div>
+              <div className="font-mono font-semibold" style={{ color: '#EAECEF' }}>{formatMs(cycleMetrics.execute_ms)}</div>
+            </div>
+            <div className="text-center">
+              <div className="text-xs mb-1" style={{ color: '#848E9C' }}>Total</div>
+              <div className="font-mono font-semibold" style={{ color: '#0ECB81' }}>{formatMs(cycleMetrics.total_ms)}</div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-4 gap-3 mt-3 pt-3" style={{ borderTop: '1px solid #2B3139' }}>
+            <div className="text-center">
+              <div className="text-xs mb-1" style={{ color: '#848E9C' }}>Candidates</div>
+              <div className="font-mono font-semibold" style={{ color: '#EAECEF' }}>{cycleMetrics.candidate_coins ?? '-'}</div>
+            </div>
+            <div className="text-center">
+              <div className="text-xs mb-1" style={{ color: '#848E9C' }}>Market OK</div>
+              <div className="font-mono font-semibold" style={{ color: '#EAECEF' }}>{cycleMetrics.market_data_ok ?? '-'}</div>
+            </div>
+            <div className="text-center">
+              <div className="text-xs mb-1" style={{ color: '#848E9C' }}>Decisions</div>
+              <div className="font-mono font-semibold" style={{ color: '#EAECEF' }}>{cycleMetrics.decisions ?? '-'}</div>
+            </div>
+            <div className="text-center">
+              <div className="text-xs mb-1" style={{ color: '#848E9C' }}>Failures</div>
+              <div className="font-mono font-semibold" style={{ color: cycleMetrics.failures && cycleMetrics.failures > 0 ? '#F6465D' : '#0ECB81' }}>
+                {cycleMetrics.failures ?? 0}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Execution Log */}
-      {decision.execution_log && decision.execution_log.length > 0 && (
+      {((nonRiskLogs && nonRiskLogs.length > 0) || (decision.execution_log && decision.execution_log.length > 0)) && (
         <div
           className="rounded-lg p-3 mt-4 text-xs font-mono space-y-1"
           style={{ background: '#0B0E11', border: '1px solid #2B3139' }}
         >
-          {decision.execution_log.map((log, index) => (
+          <div className="flex items-center justify-between mb-1">
+            <span style={{ color: '#848E9C' }}>Execution Log</span>
+            <button
+              className="text-[10px] px-2 py-1 rounded hover:opacity-80"
+              style={{ background: '#1E2329', border: '1px solid #2B3139', color: '#EAECEF' }}
+              onClick={() => setShowRawExecutionLog(!showRawExecutionLog)}
+              title="Toggle raw log (including RISK:/METRIC: entries)"
+            >
+              {showRawExecutionLog ? 'filtered' : 'raw'}
+            </button>
+          </div>
+          {(showRawExecutionLog ? (decision.execution_log || []) : nonRiskLogs).map((log, index) => (
             <div key={`${log}-${index}`} style={{ color: '#EAECEF' }}>
               {log}
             </div>

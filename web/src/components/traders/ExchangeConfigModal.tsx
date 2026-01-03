@@ -18,6 +18,7 @@ import { getShortName } from './utils'
 
 // Supported exchange templates for creating new accounts
 const SUPPORTED_EXCHANGE_TEMPLATES = [
+  { exchange_type: 'paper', name: 'Paper (Simulated Perp)', type: 'paper' as const },
   { exchange_type: 'binance', name: 'Binance Futures', type: 'cex' as const },
   { exchange_type: 'bybit', name: 'Bybit Futures', type: 'cex' as const },
   { exchange_type: 'okx', name: 'OKX Futures', type: 'cex' as const },
@@ -268,7 +269,9 @@ export function ExchangeConfigModal({
     setIsSaving(true)
     try {
       // 根据交易所类型验证不同字段
-      if (currentExchangeType === 'binance') {
+      if (currentExchangeType === 'paper') {
+        await onSave(exchangeId, exchangeType, trimmedAccountName, '')
+      } else if (currentExchangeType === 'binance') {
         if (!apiKey.trim() || !secretKey.trim()) return
         await onSave(exchangeId, exchangeType, trimmedAccountName, apiKey.trim(), secretKey.trim(), '', testnet)
       } else if (currentExchangeType === 'okx') {
@@ -497,38 +500,64 @@ export function ExchangeConfigModal({
                   </div>
                 </div>
 
-                {/* 注册链接 */}
-                <a
-                  href={exchangeRegistrationLinks[currentExchangeType || '']?.url || '#'}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="flex items-center justify-between p-3 rounded-lg mt-3 transition-all hover:scale-[1.02]"
-                  style={{
-                    background: 'rgba(240, 185, 11, 0.08)',
-                    border: '1px solid rgba(240, 185, 11, 0.2)',
-                  }}
-                >
-                  <div className="flex items-center gap-2">
-                    <UserPlus className="w-4 h-4" style={{ color: '#F0B90B' }} />
-                    <span className="text-sm" style={{ color: '#EAECEF' }}>
-                      {language === 'zh' ? '还没有交易所账号？点击注册' : "No exchange account? Register here"}
-                    </span>
-                    {exchangeRegistrationLinks[currentExchangeType || '']?.hasReferral && (
-                      <span
-                        className="text-xs px-1.5 py-0.5 rounded"
-                        style={{ background: 'rgba(14, 203, 129, 0.2)', color: '#0ECB81' }}
-                      >
-                        {language === 'zh' ? '折扣优惠' : 'Discount'}
+                {/* 注册链接（仅对真实交易所展示） */}
+                {exchangeRegistrationLinks[currentExchangeType || '']?.url && (
+                  <a
+                    href={exchangeRegistrationLinks[currentExchangeType || '']?.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center justify-between p-3 rounded-lg mt-3 transition-all hover:scale-[1.02]"
+                    style={{
+                      background: 'rgba(240, 185, 11, 0.08)',
+                      border: '1px solid rgba(240, 185, 11, 0.2)',
+                    }}
+                  >
+                    <div className="flex items-center gap-2">
+                      <UserPlus className="w-4 h-4" style={{ color: '#F0B90B' }} />
+                      <span className="text-sm" style={{ color: '#EAECEF' }}>
+                        {language === 'zh' ? '还没有交易所账号？点击注册' : "No exchange account? Register here"}
                       </span>
-                    )}
-                  </div>
-                  <ExternalLink className="w-4 h-4" style={{ color: '#848E9C' }} />
-                </a>
+                      {exchangeRegistrationLinks[currentExchangeType || '']?.hasReferral && (
+                        <span
+                          className="text-xs px-1.5 py-0.5 rounded"
+                          style={{ background: 'rgba(14, 203, 129, 0.2)', color: '#0ECB81' }}
+                        >
+                          {language === 'zh' ? '折扣优惠' : 'Discount'}
+                        </span>
+                      )}
+                    </div>
+                    <ExternalLink className="w-4 h-4" style={{ color: '#848E9C' }} />
+                  </a>
+                )}
               </div>
             )}
 
             {selectedTemplate && (
               <>
+                {/* Paper 模拟盘说明 */}
+                {currentExchangeType === 'paper' && (
+                  <div
+                    className="mb-4 p-3 rounded"
+                    style={{
+                      background: 'rgba(96, 165, 250, 0.08)',
+                      border: '1px solid rgba(96, 165, 250, 0.25)',
+                      color: '#EAECEF',
+                    }}
+                  >
+                    <div className="flex items-center gap-2 mb-1">
+                      <span style={{ color: '#60a5fa' }}>ℹ️</span>
+                      <span className="text-sm font-semibold">
+                        {language === 'zh' ? '模拟盘（Paper）' : 'Paper Trading'}
+                      </span>
+                    </div>
+                    <div className="text-sm" style={{ color: '#848E9C' }}>
+                      {language === 'zh'
+                        ? '无需填写 API Key/Secret。本地数据库会保存模拟资金、订单与仓位记录；后续切换到 Binance/Aster 实盘时，只需要新增真实交易所账户并替换 Trader 的 Exchange。'
+                        : 'No API keys required. Local database stores simulated balance, orders, and positions. To go live later, create a real exchange account (Binance/Aster) and switch the trader exchange.'}
+                    </div>
+                  </div>
+                )}
+
                 {/* Binance/Bybit/OKX/Bitget 的输入字段 */}
                 {(currentExchangeType === 'binance' ||
                   currentExchangeType === 'bybit' ||

@@ -28,10 +28,73 @@ var (
 	frCacheTTL     = 1 * time.Hour
 )
 
+type klineCacheEntry struct {
+	klines    []Kline
+	fetchedAt time.Time
+}
+
+var klineCache sync.Map // map[string]*klineCacheEntry
+
+func klineCacheTTL(interval string) time.Duration {
+	// Conservative TTLs to reduce repeated network calls without making data too stale.
+	switch interval {
+	case "1m", "3m", "5m":
+		return 15 * time.Second
+	case "15m", "30m":
+		return 45 * time.Second
+	case "1h", "2h":
+		return 5 * time.Minute
+	case "4h", "6h", "8h", "12h":
+		return 15 * time.Minute
+	case "1d", "3d", "1w":
+		return 60 * time.Minute
+	default:
+		return 30 * time.Second
+	}
+}
+
+func cacheKey(prefix, symbol, interval string, limit int) string {
+	return prefix + ":" + symbol + ":" + interval + ":" + strconv.Itoa(limit)
+}
+
+func getCachedKlines(key string, ttl time.Duration) ([]Kline, bool) {
+	v, ok := klineCache.Load(key)
+	if !ok {
+		return nil, false
+	}
+	entry, ok := v.(*klineCacheEntry)
+	if !ok || entry == nil {
+		return nil, false
+	}
+	if ttl > 0 && time.Since(entry.fetchedAt) > ttl {
+		return nil, false
+	}
+	// Return a copy to avoid accidental mutation by callers.
+	out := make([]Kline, len(entry.klines))
+	copy(out, entry.klines)
+	return out, true
+}
+
+func putCachedKlines(key string, klines []Kline) {
+	if len(klines) == 0 {
+		return
+	}
+	cp := make([]Kline, len(klines))
+	copy(cp, klines)
+	klineCache.Store(key, &klineCacheEntry{klines: cp, fetchedAt: time.Now()})
+}
+
 // Note: Kline data now uses free/open API (coinank_api.Kline) which doesn't require authentication
 
 // getKlinesFromCoinAnk fetches kline data from CoinAnk API (replacement for WSMonitorCli)
 func getKlinesFromCoinAnk(symbol, interval string, limit int) ([]Kline, error) {
+	interval = strings.TrimSpace(strings.ToLower(interval))
+	ttl := klineCacheTTL(interval)
+	key := cacheKey("coinank", symbol, interval, limit)
+	if cached, ok := getCachedKlines(key, ttl); ok {
+		return cached, nil
+	}
+
 	// Map interval string to coinank enum
 	var coinankInterval coinank_enum.Interval
 	switch interval {
@@ -90,11 +153,19 @@ func getKlinesFromCoinAnk(symbol, interval string, limit int) ([]Kline, error) {
 		}
 	}
 
+	putCachedKlines(key, klines)
 	return klines, nil
 }
 
 // getKlinesFromHyperliquid fetches kline data from Hyperliquid API for xyz dex assets
 func getKlinesFromHyperliquid(symbol, interval string, limit int) ([]Kline, error) {
+	interval = strings.TrimSpace(strings.ToLower(interval))
+	ttl := klineCacheTTL(interval)
+	key := cacheKey("hyperliquid", symbol, interval, limit)
+	if cached, ok := getCachedKlines(key, ttl); ok {
+		return cached, nil
+	}
+
 	// Remove xyz: prefix if present for the API call
 	baseCoin := strings.TrimPrefix(symbol, "xyz:")
 
@@ -131,6 +202,7 @@ func getKlinesFromHyperliquid(symbol, interval string, limit int) ([]Kline, erro
 		}
 	}
 
+	putCachedKlines(key, klines)
 	return klines, nil
 }
 
@@ -253,6 +325,22 @@ func GetWithTimeframes(symbol string, timeframes []string, primaryTimeframe stri
 		return nil, fmt.Errorf("at least one timeframe is required")
 	}
 
+	// We fetch more than we output: indicators need sufficient history, but we keep the
+	// prompt payload small by slicing to `count` when building series data.
+	// Use per-timeframe recommended lookbacks for 1h/4h/1d to reduce bias on higher TFs.
+	recommendedFetchLimit := func(tf string) int {
+		switch strings.TrimSpace(strings.ToLower(tf)) {
+		case "1h":
+			return 1200
+		case "4h":
+			return 800
+		case "1d":
+			return 500
+		default:
+			return 0
+		}
+	}
+
 	// If primary timeframe is not specified, use the first one
 	if primaryTimeframe == "" {
 		primaryTimeframe = timeframes[0]
@@ -282,16 +370,27 @@ func GetWithTimeframes(symbol string, timeframes []string, primaryTimeframe stri
 		var klines []Kline
 		var err error
 
+		fetchLimit := 200
+		if count > fetchLimit {
+			fetchLimit = count
+		}
+		if rec := recommendedFetchLimit(tf); rec > fetchLimit {
+			fetchLimit = rec
+		}
+		if fetchLimit > 1500 {
+			fetchLimit = 1500
+		}
+
 		if isXyzAsset {
 			// Use Hyperliquid API for xyz dex assets
-			klines, err = getKlinesFromHyperliquid(symbol, tf, 200)
+			klines, err = getKlinesFromHyperliquid(symbol, tf, fetchLimit)
 			if err != nil {
 				logger.Infof("⚠️ Failed to get %s %s K-line from Hyperliquid: %v", symbol, tf, err)
 				continue
 			}
 		} else {
 			// Use CoinAnk for regular crypto assets
-			klines, err = getKlinesFromCoinAnk(symbol, tf, 200)
+			klines, err = getKlinesFromCoinAnk(symbol, tf, fetchLimit)
 			if err != nil {
 				logger.Infof("⚠️ Failed to get %s %s K-line from CoinAnk: %v", symbol, tf, err)
 				continue
@@ -331,7 +430,7 @@ func GetWithTimeframes(symbol string, timeframes []string, primaryTimeframe stri
 	currentRSI7 := calculateRSI(primaryKlines, 7)
 
 	// Calculate price changes
-	priceChange1h := calculatePriceChangeByBars(primaryKlines, primaryTimeframe, 60) // 1 hour
+	priceChange1h := calculatePriceChangeByBars(primaryKlines, primaryTimeframe, 60)  // 1 hour
 	priceChange4h := calculatePriceChangeByBars(primaryKlines, primaryTimeframe, 240) // 4 hours
 
 	// Get OI data

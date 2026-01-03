@@ -51,6 +51,14 @@ detect_compose_cmd() {
     print_info "使用 Docker Compose 命令: $COMPOSE_CMD"
 }
 
+setup_compose_args() {
+    COMPOSE_ARGS=()
+    # Use explicit compose file for consistency (and to allow future extension).
+    if [ -f "docker-compose.yml" ]; then
+        COMPOSE_ARGS+=(-f docker-compose.yml)
+    fi
+}
+
 # ------------------------------------------------------------------------
 # Validation: Docker Installation
 # ------------------------------------------------------------------------
@@ -181,15 +189,19 @@ read_env_vars() {
     if [ -f ".env" ]; then
         NOFX_FRONTEND_PORT=$(grep "^NOFX_FRONTEND_PORT=" .env 2>/dev/null | cut -d'=' -f2 || echo "3000")
         NOFX_BACKEND_PORT=$(grep "^NOFX_BACKEND_PORT=" .env 2>/dev/null | cut -d'=' -f2 || echo "8080")
+        NOFX_SINGLE_USER=$(grep "^NOFX_SINGLE_USER=" .env 2>/dev/null | cut -d'=' -f2 || echo "false")
 
         NOFX_FRONTEND_PORT=$(echo "$NOFX_FRONTEND_PORT" | tr -d '"'"'" | tr -d ' ')
         NOFX_BACKEND_PORT=$(echo "$NOFX_BACKEND_PORT" | tr -d '"'"'" | tr -d ' ')
+        NOFX_SINGLE_USER=$(echo "$NOFX_SINGLE_USER" | tr -d '"'"'" | tr -d ' ')
 
         NOFX_FRONTEND_PORT=${NOFX_FRONTEND_PORT:-3000}
         NOFX_BACKEND_PORT=${NOFX_BACKEND_PORT:-8080}
+        NOFX_SINGLE_USER=${NOFX_SINGLE_USER:-false}
     else
         NOFX_FRONTEND_PORT=3000
         NOFX_BACKEND_PORT=8080
+        NOFX_SINGLE_USER=false
     fi
 }
 
@@ -214,6 +226,7 @@ start() {
     print_info "正在启动 NOFX AI Trading System..."
 
     read_env_vars
+    setup_compose_args
 
     if [ ! -d "data" ]; then
         print_info "创建数据目录..."
@@ -222,10 +235,10 @@ start() {
 
     if [ "$1" == "--build" ]; then
         print_info "重新构建镜像..."
-        $COMPOSE_CMD up -d --build
+        $COMPOSE_CMD "${COMPOSE_ARGS[@]}" up -d --build
     else
         print_info "启动容器..."
-        $COMPOSE_CMD up -d
+        $COMPOSE_CMD "${COMPOSE_ARGS[@]}" up -d
     fi
 
     print_success "服务已启动！"
@@ -241,7 +254,8 @@ start() {
 # ------------------------------------------------------------------------
 stop() {
     print_info "正在停止服务..."
-    $COMPOSE_CMD stop
+    setup_compose_args
+    $COMPOSE_CMD "${COMPOSE_ARGS[@]}" stop
     print_success "服务已停止"
 }
 
@@ -250,18 +264,30 @@ stop() {
 # ------------------------------------------------------------------------
 restart() {
     print_info "正在重启服务..."
-    $COMPOSE_CMD restart
+    setup_compose_args
+    $COMPOSE_CMD "${COMPOSE_ARGS[@]}" restart
     print_success "服务已重启"
+}
+
+# ------------------------------------------------------------------------
+# Service Management: Recreate (apply port/env changes)
+# ------------------------------------------------------------------------
+recreate() {
+    print_info "正在重建容器（应用端口/环境变量变更）..."
+    setup_compose_args
+    $COMPOSE_CMD "${COMPOSE_ARGS[@]}" up -d --force-recreate
+    print_success "容器已重建"
 }
 
 # ------------------------------------------------------------------------
 # Monitoring: Logs
 # ------------------------------------------------------------------------
 logs() {
+    setup_compose_args
     if [ -z "$2" ]; then
-        $COMPOSE_CMD logs -f
+        $COMPOSE_CMD "${COMPOSE_ARGS[@]}" logs -f
     else
-        $COMPOSE_CMD logs -f "$2"
+        $COMPOSE_CMD "${COMPOSE_ARGS[@]}" logs -f "$2"
     fi
 }
 
@@ -270,9 +296,10 @@ logs() {
 # ------------------------------------------------------------------------
 status() {
     read_env_vars
+    setup_compose_args
 
     print_info "服务状态:"
-    $COMPOSE_CMD ps
+    $COMPOSE_CMD "${COMPOSE_ARGS[@]}" ps
     echo ""
     print_info "健康检查:"
     curl -s "http://localhost:${NOFX_BACKEND_PORT}/api/health" | jq '.' || echo "后端未响应"
@@ -286,7 +313,8 @@ clean() {
     read -p "确认删除？(yes/no): " confirm
     if [ "$confirm" == "yes" ]; then
         print_info "正在清理..."
-        $COMPOSE_CMD down -v
+        setup_compose_args
+        $COMPOSE_CMD "${COMPOSE_ARGS[@]}" down -v
         print_success "清理完成"
     else
         print_info "已取消"
@@ -299,8 +327,105 @@ clean() {
 update() {
     print_info "正在更新..."
     git pull
-    $COMPOSE_CMD up -d --build
+    setup_compose_args
+    $COMPOSE_CMD "${COMPOSE_ARGS[@]}" up -d --build
     print_success "更新完成"
+}
+
+# ------------------------------------------------------------------------
+# Single-user helpers: toggle and lock registration
+# ------------------------------------------------------------------------
+single_user_on() {
+    check_env
+    set_env_var "NOFX_SINGLE_USER" "true"
+    set_env_var "NOFX_BIND_IP" "127.0.0.1"
+    set_env_var "MAX_USERS" "1"
+    set_env_var "EXPERIENCE_IMPROVEMENT" "false"
+    # Keep registration enabled for first-time setup unless already disabled
+    if ! grep -q "^REGISTRATION_ENABLED=" .env 2>/dev/null; then
+        set_env_var "REGISTRATION_ENABLED" "true"
+    fi
+    chmod 600 .env 2>/dev/null || true
+    print_success "已开启单人模式（NOFX_SINGLE_USER=true, NOFX_BIND_IP=127.0.0.1）。建议运行 ./start.sh recreate 以应用端口绑定变更"
+}
+
+single_user_off() {
+    check_env
+    set_env_var "NOFX_SINGLE_USER" "false"
+    set_env_var "NOFX_BIND_IP" "0.0.0.0"
+    chmod 600 .env 2>/dev/null || true
+    print_success "已关闭单人模式（NOFX_SINGLE_USER=false, NOFX_BIND_IP=0.0.0.0）。建议运行 ./start.sh recreate 以应用端口绑定变更"
+}
+
+lock_registration() {
+    check_env
+    set_env_var "REGISTRATION_ENABLED" "false"
+    set_env_var "MAX_USERS" "1"
+    chmod 600 .env 2>/dev/null || true
+    print_success "已锁定注册（REGISTRATION_ENABLED=false, MAX_USERS=1）。建议重启服务"
+}
+
+# ------------------------------------------------------------------------
+# Maintenance: Backup/Restore SQLite DB (single-user)
+# ------------------------------------------------------------------------
+backup_db() {
+    check_database
+
+    local db_path="data/data.db"
+    if [ ! -f "$db_path" ]; then
+        print_error "未找到数据库文件: $db_path"
+        exit 1
+    fi
+
+    local backup_dir="data/backups"
+    install -m 700 -d "$backup_dir"
+
+    local ts
+    ts=$(date +"%Y%m%d-%H%M%S")
+    local backup_path="${backup_dir}/data.db.${ts}.bak"
+
+    cp "$db_path" "$backup_path"
+    chmod 600 "$backup_path" 2>/dev/null || true
+    print_success "已备份数据库: $backup_path"
+}
+
+restore_db() {
+    local backup_path="$2"
+    if [ -z "$backup_path" ]; then
+        print_error "用法: ./start.sh restore-db <backup_file>"
+        exit 1
+    fi
+
+    if [ ! -f "$backup_path" ]; then
+        print_error "备份文件不存在: $backup_path"
+        exit 1
+    fi
+
+    check_database
+    setup_compose_args
+
+    local db_path="data/data.db"
+    local ts
+    ts=$(date +"%Y%m%d-%H%M%S")
+    local pre_restore="data/data.db.pre-restore.${ts}.bak"
+
+    print_warning "即将从备份恢复数据库，将会覆盖当前 data/data.db"
+    print_info "当前 DB 会先备份到: $pre_restore"
+
+    # Stop services to avoid SQLite write conflicts.
+    $COMPOSE_CMD "${COMPOSE_ARGS[@]}" stop || true
+
+    if [ -f "$db_path" ]; then
+        cp "$db_path" "$pre_restore"
+        chmod 600 "$pre_restore" 2>/dev/null || true
+    fi
+
+    cp "$backup_path" "$db_path"
+    chmod 600 "$db_path" 2>/dev/null || true
+
+    print_success "数据库已恢复，正在重新启动服务..."
+    $COMPOSE_CMD "${COMPOSE_ARGS[@]}" up -d
+    print_success "恢复完成"
 }
 
 # ------------------------------------------------------------------------
@@ -354,11 +479,17 @@ show_help() {
     echo "  start [--build]    启动服务（可选：重新构建）"
     echo "  stop               停止服务"
     echo "  restart            重启服务"
+    echo "  recreate           重建容器（应用端口/环境变量变更）"
     echo "  logs [service]     查看日志（可选：指定服务名 backend/frontend）"
     echo "  status             查看服务状态"
     echo "  clean              清理所有容器和数据"
     echo "  update             更新代码并重启"
+    echo "  backup-db          备份 data/data.db 到 data/backups/"
+    echo "  restore-db <file>  从备份恢复 data/data.db（会先自动备份当前 DB）"
     echo "  regenerate-keys    重新生成所有加密密钥（慎用）"
+    echo "  single-user-on     开启单人模式（NOFX_BIND_IP=127.0.0.1 仅本机访问）"
+    echo "  single-user-off    关闭单人模式"
+    echo "  lock-registration  关闭注册入口（首次注册后建议执行）"
     echo "  help               显示此帮助信息"
     echo ""
     echo "示例:"
@@ -375,6 +506,7 @@ show_help() {
 # ------------------------------------------------------------------------
 main() {
     check_docker
+    setup_compose_args
 
     case "${1:-start}" in
         start)
@@ -383,11 +515,29 @@ main() {
             check_database
             start "$2"
             ;;
+        backup-db)
+            backup_db
+            ;;
+        restore-db)
+            restore_db "$@"
+            ;;
+        single-user-on)
+            single_user_on
+            ;;
+        single-user-off)
+            single_user_off
+            ;;
+        lock-registration)
+            lock_registration
+            ;;
         stop)
             stop
             ;;
         restart)
             restart
+            ;;
+        recreate)
+            recreate
             ;;
         logs)
             logs "$@"

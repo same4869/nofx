@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Plus, X, Database, TrendingUp, List, Link, AlertCircle } from 'lucide-react'
+import { Plus, X, Database, TrendingUp, List, Link, AlertCircle, BarChart3 } from 'lucide-react'
 import type { CoinSourceConfig } from '../../types'
 
 // Default API URLs for data sources
@@ -28,6 +28,7 @@ export function CoinSourceEditor({
       coinpool: { zh: 'AI500 数据源', en: 'AI500 Data Provider' },
       oi_top: { zh: 'OI Top 持仓增长', en: 'OI Top' },
       mixed: { zh: '混合模式', en: 'Mixed Mode' },
+      topn: { zh: 'Binance TOPN（官方）', en: 'Binance TOPN (Official)' },
       staticCoins: { zh: '自定义币种', en: 'Custom Coins' },
       addCoin: { zh: '添加币种', en: 'Add Coin' },
       useCoinPool: { zh: '启用 AI500 数据源', en: 'Enable AI500 Data Provider' },
@@ -51,9 +52,23 @@ export function CoinSourceEditor({
         zh: '组合多种数据源，AI500 + OI Top + 自定义',
         en: 'Combine multiple sources: AI500 + OI Top + Custom',
       },
+      topnDesc: {
+        zh: 'Binance USDT 永续 24h 成交额 TopN（rolling 24h + 滞回）',
+        en: 'Binance USDT perp 24h quoteVolume TopN (rolling 24h + hysteresis)',
+      },
       apiUrlRequired: { zh: '需要填写 API URL 才能获取数据', en: 'API URL required to fetch data' },
       dataSourceConfig: { zh: '数据源配置', en: 'Data Source Configuration' },
       fillDefault: { zh: '填入默认', en: 'Fill Default' },
+
+      topnConfig: { zh: 'TOPN 配置', en: 'TOPN Settings' },
+      topnLimit: { zh: 'TopN 数量', en: 'TopN Size' },
+      topnRefresh: { zh: '刷新间隔（分钟）', en: 'Refresh (mins)' },
+      topnHysteresis: { zh: '滞回（保留 TopN+X）', en: 'Hysteresis (keep TopN+X)' },
+      topnMinDwell: { zh: '最短驻留（分钟）', en: 'Min Dwell (mins)' },
+      topnHint: {
+        zh: '默认强制包含 BTCUSDT/ETHUSDT；滞回用于降低币池抖动。',
+        en: 'BTCUSDT/ETHUSDT are force-included; hysteresis reduces churn.',
+      },
     }
     return translations[key]?.[language] || key
   }
@@ -63,6 +78,7 @@ export function CoinSourceEditor({
     { value: 'coinpool', icon: Database, color: '#F0B90B' },
     { value: 'oi_top', icon: TrendingUp, color: '#0ECB81' },
     { value: 'mixed', icon: Database, color: '#60a5fa' },
+    { value: 'topn', icon: BarChart3, color: '#F59E0B' },
   ] as const
 
   // xyz dex assets (stocks, forex, commodities) - should NOT get USDT suffix
@@ -122,7 +138,7 @@ export function CoinSourceEditor({
         <label className="block text-sm font-medium mb-3" style={{ color: '#EAECEF' }}>
           {t('sourceType')}
         </label>
-        <div className="grid grid-cols-4 gap-3">
+        <div className="grid grid-cols-5 gap-3">
           {sourceTypes.map(({ value, icon: Icon, color }) => (
             <button
               key={value}
@@ -155,6 +171,122 @@ export function CoinSourceEditor({
           ))}
         </div>
       </div>
+
+      {/* Binance TOPN Options */}
+      {config.source_type === 'topn' && (
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 mb-2">
+            <BarChart3 className="w-4 h-4" style={{ color: '#F59E0B' }} />
+            <span className="text-sm font-medium" style={{ color: '#EAECEF' }}>
+              {t('topnConfig')}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-2 gap-4">
+            <div className="flex items-center gap-3">
+              <span className="text-sm" style={{ color: '#848E9C' }}>
+                {t('topnLimit')}:
+              </span>
+              <input
+                type="number"
+                value={config.topn_limit || 30}
+                onChange={(e) =>
+                  !disabled &&
+                  onChange({ ...config, topn_limit: parseInt(e.target.value) || 30 })
+                }
+                disabled={disabled}
+                min={5}
+                max={200}
+                className="w-24 px-3 py-1.5 rounded"
+                style={{
+                  background: '#0B0E11',
+                  border: '1px solid #2B3139',
+                  color: '#EAECEF',
+                }}
+              />
+            </div>
+
+            <div className="flex items-center gap-3">
+              <span className="text-sm" style={{ color: '#848E9C' }}>
+                {t('topnRefresh')}:
+              </span>
+              <input
+                type="number"
+                value={config.topn_refresh_mins || 30}
+                onChange={(e) =>
+                  !disabled &&
+                  onChange({ ...config, topn_refresh_mins: parseInt(e.target.value) || 30 })
+                }
+                disabled={disabled}
+                min={5}
+                max={180}
+                className="w-24 px-3 py-1.5 rounded"
+                style={{
+                  background: '#0B0E11',
+                  border: '1px solid #2B3139',
+                  color: '#EAECEF',
+                }}
+              />
+            </div>
+
+            <div className="flex items-center gap-3">
+              <span className="text-sm" style={{ color: '#848E9C' }}>
+                {t('topnHysteresis')}:
+              </span>
+              <input
+                type="number"
+                value={config.topn_hysteresis_extra || 15}
+                onChange={(e) =>
+                  !disabled &&
+                  onChange({ ...config, topn_hysteresis_extra: parseInt(e.target.value) || 15 })
+                }
+                disabled={disabled}
+                min={0}
+                max={100}
+                className="w-24 px-3 py-1.5 rounded"
+                style={{
+                  background: '#0B0E11',
+                  border: '1px solid #2B3139',
+                  color: '#EAECEF',
+                }}
+              />
+            </div>
+
+            <div className="flex items-center gap-3">
+              <span className="text-sm" style={{ color: '#848E9C' }}>
+                {t('topnMinDwell')}:
+              </span>
+              <input
+                type="number"
+                value={config.topn_min_dwell_mins || 360}
+                onChange={(e) =>
+                  !disabled &&
+                  onChange({ ...config, topn_min_dwell_mins: parseInt(e.target.value) || 360 })
+                }
+                disabled={disabled}
+                min={0}
+                max={1440}
+                className="w-24 px-3 py-1.5 rounded"
+                style={{
+                  background: '#0B0E11',
+                  border: '1px solid #2B3139',
+                  color: '#EAECEF',
+                }}
+              />
+            </div>
+          </div>
+
+          <div
+            className="flex items-start gap-2 p-3 rounded-lg"
+            style={{ background: 'rgba(245, 158, 11, 0.08)', border: '1px solid rgba(245, 158, 11, 0.25)' }}
+          >
+            <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" style={{ color: '#F59E0B' }} />
+            <div className="text-sm" style={{ color: '#EAECEF' }}>
+              {t('topnHint')}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Static Coins */}
       {(config.source_type === 'static' || config.source_type === 'mixed') && (

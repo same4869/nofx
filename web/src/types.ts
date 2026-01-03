@@ -116,10 +116,10 @@ export interface AIModel {
 
 export interface Exchange {
   id: string                     // UUID (empty for supported exchange templates)
-  exchange_type: string          // "binance", "bybit", "okx", "hyperliquid", "aster", "lighter"
+  exchange_type: string          // "paper", "binance", "bybit", "okx", "hyperliquid", "aster", "lighter"
   account_name: string           // User-defined account name
   name: string                   // Display name
-  type: 'cex' | 'dex'
+  type: 'cex' | 'dex' | 'paper'
   enabled: boolean
   apiKey?: string
   secretKey?: string
@@ -139,7 +139,7 @@ export interface Exchange {
 }
 
 export interface CreateExchangeRequest {
-  exchange_type: string          // "binance", "bybit", "okx", "hyperliquid", "aster", "lighter"
+  exchange_type: string          // "paper", "binance", "bybit", "okx", "hyperliquid", "aster", "lighter"
   account_name: string           // User-defined account name
   enabled: boolean
   api_key?: string
@@ -449,7 +449,7 @@ export interface StrategyConfig {
 }
 
 export interface CoinSourceConfig {
-  source_type: 'static' | 'coinpool' | 'oi_top' | 'mixed';
+  source_type: 'static' | 'coinpool' | 'oi_top' | 'mixed' | 'topn';
   static_coins?: string[];
   use_coin_pool: boolean;
   coin_pool_limit?: number;
@@ -457,6 +457,12 @@ export interface CoinSourceConfig {
   use_oi_top: boolean;
   oi_top_limit?: number;
   oi_top_api_url?: string;     // OI Top API URL
+
+  // Binance TOPN (official) - used when source_type = 'topn'
+  topn_limit?: number;             // default 30
+  topn_refresh_mins?: number;      // default 30
+  topn_hysteresis_extra?: number;  // default 15
+  topn_min_dwell_mins?: number;    // default 360
 }
 
 export interface IndicatorConfig {
@@ -525,6 +531,11 @@ export interface RiskControlConfig {
   // Risk Parameters
   max_margin_usage: number;        // Max margin utilization, e.g. 0.9 = 90% (CODE ENFORCED)
   min_position_size: number;       // Min position size in USDT (CODE ENFORCED)
+  daily_loss_limit?: number;       // Daily loss circuit breaker (ratio). 0/undefined disables. (CODE ENFORCED)
+  max_drawdown?: number;           // Max drawdown circuit breaker from peak equity (ratio). 0/undefined disables. (CODE ENFORCED)
+  stop_cooldown_minutes?: number;  // Cooldown minutes after circuit breaker triggers. (CODE ENFORCED)
+  max_risk_usd?: number;           // Per-trade max risk in USD (Decision.risk_usd). 0/undefined disables. (CODE ENFORCED)
+  require_protection?: boolean;    // Require SL/TP set success, otherwise rollback. (CODE ENFORCED)
   min_risk_reward_ratio: number;   // Min take_profit / stop_loss ratio (AI guided)
   min_confidence: number;          // Min AI confidence to open position (AI guided)
 }
